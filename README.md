@@ -1,6 +1,10 @@
-# ZHIRAI Apartment Energy Manager
+# TangXiaoqi Xiaomi Mi Home Apartment Energy Control Platform
 
-ZAEM is an apartment energy management system for monitoring Xiaomi smart power devices, tracking real electricity usage, and managing room-level limits from a responsive web dashboard.
+ZAEM is a Xiaomi / Mi Home apartment energy control platform for monitoring smart power devices, tracking real cumulative electricity usage, managing room-level limits, and operating devices from a responsive dashboard.
+
+## Keywords
+
+Xiaomi, Mi Home, apartment energy manager, smart power control, room electricity dashboard, Xiaomi power switch management, Europe/Vienna energy statistics
 
 ## Stack
 
@@ -60,3 +64,10 @@ docker compose up -d
 
 - Do not commit real `.env` files or Xiaomi account credentials.
 - Energy statistics are designed around real cumulative meter values instead of local estimated accumulation.
+
+## License
+
+This repository is published as source-available software under [`PolyForm Noncommercial 1.0.0`](./LICENSE).
+
+- Allowed: personal study, research, testing, noncommercial learning, and noncommercial modification.
+- Not allowed: commercial use, paid redistribution, or using this repository in commercial products or services without separate permission.

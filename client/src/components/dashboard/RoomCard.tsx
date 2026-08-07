@@ -339,7 +339,7 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
           </Badge>
         </div>
 
-        <div className="grid grid-cols-2 gap-2 text-[clamp(0.68rem,1vw,0.78rem)] xl:grid-cols-4">
+        <div className="grid grid-cols-2 gap-2 text-[clamp(0.68rem,1vw,0.78rem)]">
           <div className="rounded-md bg-muted/40 p-2">
             <div className="text-muted-foreground">实时功率</div>
             <div className="mt-1 break-words text-[clamp(0.74rem,1.2vw,0.95rem)] font-semibold">

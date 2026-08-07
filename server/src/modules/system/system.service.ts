@@ -11,6 +11,7 @@ const DEFAULT_SETTINGS: SystemSettingsData = {
   alarmRatio90: 0.9,
   alarmRatio95: 0.95,
   autoCutoff: true,
+  autoRestorePower: true,
   businessTimezone: DEFAULT_BUSINESS_TIMEZONE,
   refreshInterval: 30,
   dailyResetHour: 0,
@@ -18,6 +19,24 @@ const DEFAULT_SETTINGS: SystemSettingsData = {
 };
 
 type SettingsKey = keyof SystemSettingsData;
+const ALARM_RATIO_KEYS: SettingsKey[] = ['alarmRatio80', 'alarmRatio90', 'alarmRatio95'];
+
+function isAlarmRatioKey(key: SettingsKey): boolean {
+  return ALARM_RATIO_KEYS.includes(key);
+}
+
+function normalizeAlarmRatioValue(value: string | number): number {
+  const numValue = typeof value === 'number' ? value : parseFloat(value);
+  if (Number.isNaN(numValue)) {
+    return 0;
+  }
+
+  if (numValue > 1) {
+    return numValue / 100;
+  }
+
+  return numValue;
+}
 
 class SystemService {
   public async getSettings(): Promise<SystemSettingsData> {
@@ -27,10 +46,13 @@ class SystemService {
     for (const setting of settings) {
       const key = setting.key as SettingsKey;
       if (key in DEFAULT_SETTINGS) {
-        if (key === 'autoCutoff') {
+        if (key === 'autoCutoff' || key === 'autoRestorePower') {
           result[key] = setting.value === 'true';
         } else if (key === 'businessTimezone') {
           result[key] = normalizeBusinessTimeZone(setting.value);
+        } else if (isAlarmRatioKey(key)) {
+          (result as unknown as Record<string, number | boolean | string>)[key] =
+            normalizeAlarmRatioValue(setting.value);
         } else {
           const numValue = parseFloat(setting.value);
           if (!isNaN(numValue)) {
@@ -53,6 +75,8 @@ class SystemService {
       const normalizedValue =
         key === 'businessTimezone'
           ? normalizeBusinessTimeZone(String(value))
+          : isAlarmRatioKey(key)
+            ? normalizeAlarmRatioValue(value as string | number)
           : value;
       const stringValue =
         typeof normalizedValue === 'boolean' ? String(normalizedValue) : String(normalizedValue);
@@ -86,12 +110,16 @@ class SystemService {
       return fallback !== undefined ? fallback : DEFAULT_SETTINGS[key];
     }
 
-    if (key === 'autoCutoff') {
+    if (key === 'autoCutoff' || key === 'autoRestorePower') {
       return (setting.value === 'true') as SystemSettingsData[K];
     }
 
     if (key === 'businessTimezone') {
       return normalizeBusinessTimeZone(setting.value) as SystemSettingsData[K];
+    }
+
+    if (isAlarmRatioKey(key)) {
+      return normalizeAlarmRatioValue(setting.value) as SystemSettingsData[K];
     }
 
     const numValue = parseFloat(setting.value);

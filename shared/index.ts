@@ -191,6 +191,7 @@ export interface SystemSettingsData {
   alarmRatio90: number;
   alarmRatio95: number;
   autoCutoff: boolean;
+  autoRestorePower: boolean;
   businessTimezone: string;
   refreshInterval: number;
   dailyResetHour: number;

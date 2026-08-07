@@ -133,7 +133,7 @@ const DEFAULT_FILTERS: Filters = {
 }
 
 interface PaginatedResponse {
-  list: AlarmLogResponse[]
+  items: AlarmLogResponse[]
   total: number
   page: number
   pageSize: number
@@ -229,7 +229,7 @@ export function AlarmCenterPage() {
     setPage(page + 1)
   }
 
-  const list: AlarmLogResponse[] = data?.list ?? []
+  const list: AlarmLogResponse[] = data?.items ?? []
   const total: number = data?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
 

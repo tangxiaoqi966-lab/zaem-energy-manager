@@ -24,7 +24,6 @@ interface StatItem {
     text: string;
     variant: 'success' | 'danger' | 'warning' | 'default';
   };
-  hidden?: boolean;
 }
 
 const numberFormatter2 = new Intl.NumberFormat('de-AT', {
@@ -85,14 +84,14 @@ export function StatsCards({ summary, pricePerKwh }: StatsCardsProps) {
       key: 'status',
       label: '设备状态',
       valueNode: (
-        <div className="flex flex-wrap items-center gap-3 pt-1">
+        <div className="flex flex-wrap items-center gap-1.5 pt-1">
           <div className="inline-flex items-center gap-1.5">
-            <Wifi className="h-4 w-4 text-green-600" />
-            <span className="font-semibold">{summary.onlineDevices} 在线</span>
+            <Wifi className="h-3.5 w-3.5 text-green-600" />
+            <span className="text-sm font-semibold">{summary.onlineDevices}</span>
           </div>
           <div className="inline-flex items-center gap-1.5">
-            <WifiOff className="h-4 w-4 text-red-600" />
-            <span className="font-semibold">{summary.offlineDevices} 离线</span>
+            <WifiOff className="h-3.5 w-3.5 text-red-600" />
+            <span className="text-sm font-semibold">{summary.offlineDevices}</span>
           </div>
         </div>
       ),
@@ -109,28 +108,23 @@ export function StatsCards({ summary, pricePerKwh }: StatsCardsProps) {
       iconBg: 'bg-orange-500/10',
       iconColor: 'text-orange-500',
       badge: { text: '告警', variant: 'warning' },
-      hidden: summary.alarmCount <= 0,
     },
   ];
 
-  const visibleStats = stats.filter((stat) => !stat.hidden);
-
   return (
-    <div className="grid grid-cols-2 gap-4 md:grid-cols-[repeat(auto-fit,minmax(220px,1fr))]">
-      {visibleStats.map((stat) => {
+    <div className="grid grid-cols-4 gap-2 sm:gap-3">
+      {stats.map((stat) => {
         const Icon = stat.icon;
-        const mobileSpanClass =
-          stat.key === 'status' || stat.key === 'alarm' ? 'col-span-2' : '';
         const card = (
-          <Card key={stat.label} className={mobileSpanClass}>
-            <CardContent className="p-4">
-              <div className="flex items-center gap-4">
-                <div className={cn('p-3 rounded-lg shrink-0', stat.iconBg)}>
-                  <Icon className={cn('w-5 h-5', stat.iconColor)} />
+          <Card key={stat.label}>
+            <CardContent className="p-2.5 sm:p-3">
+              <div className="flex items-center gap-2 sm:gap-3">
+                <div className={cn('rounded-lg p-2 shrink-0', stat.iconBg)}>
+                  <Icon className={cn('h-4 w-4', stat.iconColor)} />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <p className="text-xs text-muted-foreground truncate">{stat.label}</p>
+                  <div className="flex items-center gap-1.5">
+                    <p className="truncate text-[11px] text-muted-foreground sm:text-xs">{stat.label}</p>
                     {stat.badge && (
                       <Badge variant={stat.badge.variant} className="shrink-0 text-[10px] px-1.5 py-0">
                         {stat.badge.text}
@@ -140,7 +134,7 @@ export function StatsCards({ summary, pricePerKwh }: StatsCardsProps) {
                   {stat.valueNode ? (
                     <div>{stat.valueNode}</div>
                   ) : (
-                    <div className="mt-1 text-xl font-bold">{stat.value}</div>
+                    <div className="mt-1 text-sm font-bold sm:text-lg">{stat.value}</div>
                   )}
                 </div>
               </div>

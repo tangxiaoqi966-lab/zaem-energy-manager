@@ -1,15 +1,16 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { LayoutDashboard, BarChart3, Power, RefreshCw, ShieldAlert } from 'lucide-react';
+import { LayoutDashboard, BarChart3, Power, RefreshCw, ShieldAlert, BellRing } from 'lucide-react';
 import { toast } from 'sonner';
 import * as api from '@/lib/api';
 import { getSocket } from '@/lib/socket';
-import { RoomStatus, UserRole } from '@/types';
-import type { DashboardSummary } from '@/types';
+import { RoomStatus, UserRole, AlarmLevel } from '@/types';
+import type { DashboardSummary, AlarmLogResponse } from '@/types';
 import { StatsCards } from '@/components/dashboard/StatsCards';
 import { RoomsGrid, type DashboardSpaceCard } from '@/components/dashboard/RoomsGrid';
 import { Separator } from '@/components/ui/separator';
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { useAuthStore } from '@/store/auth';
 import {
   Dialog,
@@ -43,6 +44,19 @@ export function DashboardPage() {
     queryFn: () => api.system.getSettings(),
     refetchOnWindowFocus: false,
     staleTime: 1000 * 60,
+  });
+  const { data: unresolvedAlarms } = useQuery<{
+    items: AlarmLogResponse[];
+    total: number;
+    page: number;
+    pageSize: number;
+  }>({
+    queryKey: ['dashboard-unresolved-alarms'],
+    queryFn: () => api.logs.alarms({ page: 1, pageSize: 1, resolved: false }),
+    refetchOnWindowFocus: false,
+    refetchInterval: 5000,
+    refetchIntervalInBackground: true,
+    staleTime: 3000,
   });
 
   useEffect(() => {
@@ -122,6 +136,12 @@ export function DashboardPage() {
     if (!rooms.length) return false;
     return rooms.every((room) => room.limitEnabled);
   }, [summary]);
+  const latestAlarm = unresolvedAlarms?.items?.[0];
+  const unresolvedAlarmCount = Number(unresolvedAlarms?.total ?? 0);
+  const latestAlarmBadgeVariant =
+    latestAlarm?.level === AlarmLevel.CRITICAL || latestAlarm?.level === AlarmLevel.DANGER
+      ? 'destructive'
+      : 'default';
 
   const refreshDashboard = async () => {
     try {
@@ -236,6 +256,18 @@ export function DashboardPage() {
       ) : (
         <StatsCards summary={summary} pricePerKwh={pricePerKwh} />
       )}
+
+      {latestAlarm ? (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+          <BellRing className="h-4 w-4 shrink-0" />
+          <Badge variant={latestAlarmBadgeVariant} className="shrink-0">
+            {unresolvedAlarmCount > 1 ? `最新报警 · 共 ${unresolvedAlarmCount} 条` : '最新报警'}
+          </Badge>
+          <span className="min-w-0 flex-1 truncate">
+            {latestAlarm.displayName ?? latestAlarm.roomNumber ?? '未知房间'}：{latestAlarm.message}
+          </span>
+        </div>
+      ) : null}
 
       <Separator />
 

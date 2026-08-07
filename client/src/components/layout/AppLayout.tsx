@@ -1,5 +1,6 @@
 import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
 import { useEffect } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import {
   Home,
   BarChart3,
@@ -13,9 +14,11 @@ import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { Avatar, AvatarFallback } from '../ui/avatar';
 import { Separator } from '../ui/separator';
+import { Badge } from '../ui/badge';
 import { useAuthStore } from '../../store/auth';
 import { useUiStore } from '../../store/ui';
 import { UserRole } from '../../types';
+import * as api from '../../lib/api';
 
 const menuItems = [
   { to: '/', icon: Home, label: '仪表盘', end: true },
@@ -39,6 +42,15 @@ export function AppLayout() {
   const location = useLocation();
   const { user, logout } = useAuthStore();
   const { sidebarOpen, toggleSidebar, setSidebarOpen } = useUiStore();
+  const { data: alarmSummary } = useQuery({
+    queryKey: ['sidebar-alarm-summary'],
+    queryFn: () => api.logs.alarms({ page: 1, pageSize: 1, resolved: false }),
+    refetchOnWindowFocus: false,
+    refetchInterval: 5000,
+    refetchIntervalInBackground: true,
+    staleTime: 3000,
+  });
+  const unresolvedAlarmCount = Number(alarmSummary?.total ?? 0);
 
   const getPageTitle = () => {
     if (location.pathname.startsWith('/rooms/')) {
@@ -82,12 +94,7 @@ export function AppLayout() {
         )}
       >
         <div className="flex h-16 items-center justify-between px-4">
-          <span className="hidden text-xl font-bold tracking-tight md:inline">ZAEM</span>
-          {sidebarOpen ? (
-            <span className="text-xl font-bold tracking-tight md:hidden">ZAEM</span>
-          ) : (
-            <span className="text-xl font-bold md:hidden">Z</span>
-          )}
+          <span className="text-xl font-bold tracking-tight">ZAEM</span>
         </div>
 
         <Separator />
@@ -110,7 +117,15 @@ export function AppLayout() {
               onClick={() => setSidebarOpen(false)}
             >
               <Icon className="h-5 w-5 shrink-0" />
-              <span>{label}</span>
+              <span className="min-w-0 flex-1 truncate">{label}</span>
+              {to === '/logs/alarms' && unresolvedAlarmCount > 0 ? (
+                <Badge
+                  variant="destructive"
+                  className="h-5 min-w-5 rounded-full px-1 text-[10px] leading-none"
+                >
+                  {unresolvedAlarmCount > 99 ? '99+' : unresolvedAlarmCount}
+                </Badge>
+              ) : null}
             </NavLink>
           ))}
         </nav>

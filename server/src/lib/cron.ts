@@ -22,6 +22,11 @@ let lastDailyResetDayKey = '';
 
 async function dailyResetTask(): Promise<void> {
   try {
+    const autoRestorePower = await systemService.getSetting('autoRestorePower', true);
+    if (!autoRestorePower) {
+      return;
+    }
+
     const cutoffRooms = await prisma.room.findMany({
       where: { cutoff: true },
     });

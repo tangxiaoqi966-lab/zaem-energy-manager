@@ -388,7 +388,7 @@ export async function checkAndTriggerAlarms(roomId: string): Promise<RoomStatus>
   const tomorrow = addDays(today, 1);
 
   const percent = realtime.usagePercent;
-  if (!realtime.limitEnabled) {
+  if (realtime.dailyLimit == null || realtime.dailyLimit <= 0) {
     await prisma.room.update({
       where: { id: roomId },
       data: { status: realtime.status as any },

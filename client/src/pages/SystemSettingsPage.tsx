@@ -240,6 +240,15 @@ export function SystemSettingsPage() {
     return fallback
   }
 
+  const getPercentValue = (
+    key: 'alarmRatio80' | 'alarmRatio90' | 'alarmRatio95',
+    fallbackRatio: number,
+  ) => {
+    const ratio = Number(getValue(key, fallbackRatio) ?? fallbackRatio)
+    if (Number.isNaN(ratio)) return ''
+    return ratio <= 1 ? ratio * 100 : ratio
+  }
+
   const setValue = <K extends keyof SystemSettingsData>(
     key: K,
     value: SystemSettingsData[K]
@@ -491,9 +500,9 @@ export function SystemSettingsPage() {
                       min="0"
                       max="100"
                       step="1"
-                      value={getValue('alarmRatio80', 80) ?? ''}
+                      value={getPercentValue('alarmRatio80', 0.8)}
                       onChange={(e) =>
-                        setValue('alarmRatio80', parseFloat(e.target.value) || 0)
+                        setValue('alarmRatio80', (parseFloat(e.target.value) || 0) / 100)
                       }
                       disabled={!canEdit}
                     />
@@ -506,9 +515,9 @@ export function SystemSettingsPage() {
                       min="0"
                       max="100"
                       step="1"
-                      value={getValue('alarmRatio90', 90) ?? ''}
+                      value={getPercentValue('alarmRatio90', 0.9)}
                       onChange={(e) =>
-                        setValue('alarmRatio90', parseFloat(e.target.value) || 0)
+                        setValue('alarmRatio90', (parseFloat(e.target.value) || 0) / 100)
                       }
                       disabled={!canEdit}
                     />
@@ -521,9 +530,9 @@ export function SystemSettingsPage() {
                       min="0"
                       max="100"
                       step="1"
-                      value={getValue('alarmRatio95', 95) ?? ''}
+                      value={getPercentValue('alarmRatio95', 0.95)}
                       onChange={(e) =>
-                        setValue('alarmRatio95', parseFloat(e.target.value) || 0)
+                        setValue('alarmRatio95', (parseFloat(e.target.value) || 0) / 100)
                       }
                       disabled={!canEdit}
                     />
