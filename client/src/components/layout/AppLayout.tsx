@@ -1,0 +1,170 @@
+import { Outlet, NavLink, useNavigate, useLocation } from 'react-router-dom';
+import { useEffect } from 'react';
+import {
+  Home,
+  BarChart3,
+  Settings,
+  List,
+  Bell,
+  LogOut,
+  Menu,
+} from 'lucide-react';
+import { cn } from '../../lib/utils';
+import { Button } from '../ui/button';
+import { Avatar, AvatarFallback } from '../ui/avatar';
+import { Separator } from '../ui/separator';
+import { useAuthStore } from '../../store/auth';
+import { useUiStore } from '../../store/ui';
+import { UserRole } from '../../types';
+
+const menuItems = [
+  { to: '/', icon: Home, label: '仪表盘', end: true },
+  { to: '/charts', icon: BarChart3, label: '图表' },
+  { to: '/system', icon: Settings, label: '系统设置' },
+  { to: '/logs/operations', icon: List, label: '操作日志' },
+  { to: '/logs/alarms', icon: Bell, label: '报警中心' },
+];
+
+const pageTitles: Record<string, string> = {
+  '/': '仪表盘',
+  '/charts': '图表',
+  '/energy-limits': '限电设置',
+  '/system': '系统设置',
+  '/logs/operations': '操作日志',
+  '/logs/alarms': '报警中心',
+};
+
+export function AppLayout() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { user, logout } = useAuthStore();
+  const { sidebarOpen, toggleSidebar, setSidebarOpen } = useUiStore();
+
+  const getPageTitle = () => {
+    if (location.pathname.startsWith('/rooms/')) {
+      return '房间详情';
+    }
+    return pageTitles[location.pathname] || '仪表盘';
+  };
+
+  const handleLogout = () => {
+    logout();
+    navigate('/login');
+  };
+
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location.pathname, setSidebarOpen]);
+
+  const initials = user?.name?.slice(0, 2).toUpperCase() || 'ZA';
+  const roleLabel =
+    user?.role === UserRole.ADMIN
+      ? '超级管理员'
+      : user?.role === UserRole.BOSS
+        ? '管理员'
+        : '只读用户';
+
+  return (
+    <div className="flex h-screen bg-background">
+      {sidebarOpen && (
+        <button
+          type="button"
+          aria-label="关闭侧边栏遮罩"
+          className="fixed inset-0 z-30 bg-black/40 md:hidden"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+      <aside
+        className={cn(
+          'fixed inset-y-0 left-0 z-40 flex h-full flex-col border-r bg-card transition-transform duration-200 md:static md:z-auto',
+          sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0',
+          'w-[84vw] max-w-[280px] md:w-56'
+        )}
+      >
+        <div className="flex h-16 items-center justify-between px-4">
+          <span className="hidden text-xl font-bold tracking-tight md:inline">ZAEM</span>
+          {sidebarOpen ? (
+            <span className="text-xl font-bold tracking-tight md:hidden">ZAEM</span>
+          ) : (
+            <span className="text-xl font-bold md:hidden">Z</span>
+          )}
+        </div>
+
+        <Separator />
+
+        <nav className="flex-1 space-y-1 p-2">
+          {menuItems.map(({ to, icon: Icon, label, end }) => (
+            <NavLink
+              key={to}
+              to={to}
+              end={end}
+              className={({ isActive }) =>
+                cn(
+                  'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+                  isActive
+                    ? 'bg-primary text-primary-foreground'
+                    : 'text-muted-foreground hover:bg-accent hover:text-accent-foreground',
+                  'justify-start md:w-auto'
+                )
+              }
+              onClick={() => setSidebarOpen(false)}
+            >
+              <Icon className="h-5 w-5 shrink-0" />
+              <span>{label}</span>
+            </NavLink>
+          ))}
+        </nav>
+
+        <Separator />
+
+        <div className="p-2">
+          <div
+            className={cn(
+              'flex items-center gap-3 rounded-md p-2 justify-start'
+            )}
+          >
+            <Avatar className="h-9 w-9">
+              <AvatarFallback className="text-sm">{initials}</AvatarFallback>
+            </Avatar>
+            <div className="flex flex-1 flex-col overflow-hidden">
+              <span className="truncate text-sm font-medium">
+                {user?.name || 'User'}
+              </span>
+              <span className="truncate text-xs text-muted-foreground">
+                {(user?.username || '') + (user?.username ? ' · ' : '') + roleLabel}
+              </span>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={handleLogout}
+              title="退出登录"
+            >
+              <LogOut className="h-4 w-4" />
+            </Button>
+          </div>
+        </div>
+      </aside>
+
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="flex h-14 items-center justify-between border-b px-3 sm:h-16 sm:px-4 md:px-6">
+          <div className="flex items-center gap-3">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={toggleSidebar}
+              className="md:hidden"
+            >
+              <Menu className="h-5 w-5" />
+            </Button>
+            <h1 className="truncate text-base font-semibold sm:text-lg">{getPageTitle()}</h1>
+          </div>
+        </header>
+
+        <main className="flex-1 overflow-auto p-3 sm:p-4 md:p-6">
+          <Outlet />
+        </main>
+      </div>
+    </div>
+  );
+}

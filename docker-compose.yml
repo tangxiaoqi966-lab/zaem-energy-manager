@@ -1,0 +1,83 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: zaem-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: zaem
+      POSTGRES_PASSWORD: zaem_password
+      POSTGRES_DB: zaem_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - zaem-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zaem -d zaem_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: zaem-redis
+    restart: always
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - zaem-network
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: zaem-server
+    restart: always
+    ports:
+      - "3011:3001"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://zaem:zaem_password@postgres:5432/zaem_db?schema=public
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: zaem_jwt_secret_change_in_production
+      PORT: 3001
+      CORS_ORIGIN: http://localhost:3010
+      XIAOMI_USERNAME: "xtang3125@gmail.com"
+      XIAOMI_PASSWORD: "xtang950825qi"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - zaem-network
+
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    container_name: zaem-client
+    restart: always
+    ports:
+      - "3010:80"
+    depends_on:
+      - server
+    networks:
+      - zaem-network
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  zaem-network:
+    driver: bridge

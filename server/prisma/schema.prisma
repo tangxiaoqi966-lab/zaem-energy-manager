@@ -1,0 +1,204 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  admin
+  boss
+  user
+}
+
+enum RoomStatus {
+  normal
+  warning_80
+  warning_90
+  warning_95
+  cutoff
+  offline
+}
+
+enum AlarmType {
+  limit_80
+  limit_90
+  limit_95
+  limit_reached
+  device_offline
+  control_failed
+  sync_failed
+}
+
+enum AlarmLevel {
+  info
+  warning
+  danger
+  critical
+}
+
+enum OperationType {
+  login
+  logout
+  update_limit
+  cutoff_power
+  restore_power
+  update_alarm
+  update_settings
+  sync_devices
+  control_device
+}
+
+enum DeviceStatus {
+  online
+  offline
+  unknown
+}
+
+model Role {
+  id        String   @id @default(cuid())
+  name      UserRole @unique
+  users     User[]
+  createdAt DateTime @default(now())
+}
+
+model User {
+  id           String        @id @default(cuid())
+  username     String        @unique
+  passwordHash String
+  name         String
+  roleId       String
+  role         Role          @relation(fields: [roleId], references: [id])
+  lastLoginAt  DateTime?
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  operationLogs OperationLog[]
+}
+
+model Room {
+  id         String       @id @default(cuid())
+  roomNumber String       @unique
+  name       String
+  floor      Int          @default(1)
+  status     RoomStatus   @default(normal)
+  cutoff     Boolean      @default(false)
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  devices    Device[]
+  energyLimit EnergyLimit?
+  dailyEnergy DailyEnergy[]
+  hourlyEnergy HourlyEnergy[]
+  monthlyEnergy MonthlyEnergy[]
+  alarmLogs  AlarmLog[]
+  operationLogs OperationLog[]
+}
+
+model Device {
+  id         String       @id @default(cuid())
+  did        String       @unique
+  name       String
+  model      String
+  roomId     String?
+  room       Room?        @relation(fields: [roomId], references: [id])
+  status     DeviceStatus @default(unknown)
+  power      Boolean?
+  powerW     Float?
+  currentA   Float?
+  voltageV   Float?
+  totalKwh   Float?
+  lastSyncAt DateTime?
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+}
+
+model EnergyLimit {
+  id         String   @id @default(cuid())
+  roomId     String   @unique
+  room       Room     @relation(fields: [roomId], references: [id])
+  dailyLimit Float    @default(10)
+  enabled    Boolean  @default(false)
+  updatedAt  DateTime @updatedAt
+  createdAt  DateTime @default(now())
+}
+
+model DailyEnergy {
+  id        String   @id @default(cuid())
+  roomId    String
+  room      Room     @relation(fields: [roomId], references: [id])
+  date      DateTime
+  usageKwh  Float    @default(0)
+  cost      Float    @default(0)
+  peakW     Float    @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([roomId, date])
+  @@index([date])
+}
+
+model HourlyEnergy {
+  id        String   @id @default(cuid())
+  roomId    String
+  room      Room     @relation(fields: [roomId], references: [id])
+  date      DateTime
+  hour      Int
+  usageKwh  Float    @default(0)
+  peakW     Float    @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([roomId, date, hour])
+  @@index([date])
+}
+
+model MonthlyEnergy {
+  id        String   @id @default(cuid())
+  roomId    String
+  room      Room     @relation(fields: [roomId], references: [id])
+  year      Int
+  month     Int
+  usageKwh  Float    @default(0)
+  cost      Float    @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([roomId, year, month])
+}
+
+model AlarmLog {
+  id         String     @id @default(cuid())
+  type       AlarmType
+  level      AlarmLevel
+  roomId     String?
+  room       Room?      @relation(fields: [roomId], references: [id])
+  message    String
+  resolved   Boolean    @default(false)
+  resolvedAt DateTime?
+  createdAt  DateTime   @default(now())
+
+  @@index([createdAt])
+}
+
+model OperationLog {
+  id         String        @id @default(cuid())
+  type       OperationType
+  userId     String?
+  user       User?         @relation(fields: [userId], references: [id])
+  roomId     String?
+  room       Room?         @relation(fields: [roomId], references: [id])
+  details    String
+  success    Boolean       @default(true)
+  createdAt  DateTime      @default(now())
+
+  @@index([createdAt])
+}
+
+model SystemSettings {
+  id             String  @id @default(cuid())
+  key            String  @unique
+  value          String
+  description    String?
+  updatedAt      DateTime @updatedAt
+  createdAt      DateTime @default(now())
+}

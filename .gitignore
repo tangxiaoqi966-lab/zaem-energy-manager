@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+.env.*.local
+*.log
+npm-debug.log*
+.DS_Store
+.idea/
+.vscode/
+coverage/
+*.tsbuildinfo
+data/
+dist_zaem_*.zip
+debug-*.md
+.dbg/

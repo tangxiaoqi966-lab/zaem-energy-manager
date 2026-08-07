@@ -1,0 +1,9 @@
+RewriteEngine On
+
+# Let real files and directories pass through directly.
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Send SPA routes back to the app entry.
+RewriteRule ^ index.html [L]
