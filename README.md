@@ -1,79 +1,503 @@
-# ZHIRAI Xiaomi Mi Home Apartment Energy Control Platform
+# ZHIRAI Apartment Energy Manager
 
-ZHIRAI is a Xiaomi / Mi Home apartment energy control platform for monitoring smart power devices, tracking real cumulative electricity usage, managing room-level limits, and operating devices from a responsive dashboard.
+ZHIRAI Apartment Energy Manager 是一套给公寓、宿舍、出租房、多房间空间做集中用电管理的系统。它把 Xiaomi / Mi Home 智能通断器接进来后，能把原本分散在米家里的设备状态、实时功率、今日用电、历史电量、超额报警、手动断电、自动恢复这些能力，统一放到一个网页后台里。
 
-## Keywords
+简单说，这套系统解决的是这几个实际问题：
 
-Xiaomi, Mi Home, apartment energy manager, smart power control, room electricity dashboard, Xiaomi power switch management, Europe/Vienna energy statistics
+- 房间多，设备多，想在一个后台里统一看
+- 想知道每个房间今天到底用了多少电，而不是只看一个瞬时功率
+- 想给每个房间设置单独日限额，到了就自动断电
+- 想在第二天自动恢复，不用人工一个个开
+- 想看报警、历史趋势、操作记录，而不是只会开关电源
+- 想在手机上也能直接操作，不想专门做 App
 
-## Stack
+适用关键词：`Xiaomi`、`Mi Home`、`Apartment Energy Manager`、`Smart Power Control`、`Room Electricity Dashboard`、`Energy Control Platform`
 
-- React + TypeScript + Vite
-- Node.js + Express + Prisma
-- PostgreSQL
-- Redis
-- Docker Compose
+## 这套系统到底能干什么
 
-## Features
+如果你是第一次看这个项目，最直接的理解方式就是看“买来之后你能用它做什么”。
 
-- Xiaomi smart device login and sync
-- Real cumulative energy based statistics
-- Europe/Vienna business-time calculation
-- Daily limits and automatic power cutoff
-- Dashboard, charts, alarms, and operation logs
-- Mobile-friendly responsive UI
+### 1. 统一接入米家设备
 
-## Screenshot
+系统可以接入 Xiaomi / Mi Home 账号，把通断器、插座这一类设备同步到本系统里。
+
+接入后你可以做到：
+
+- 在系统里查看设备是否在线
+- 把设备映射到具体房间或空间
+- 从系统里刷新同步设备状态
+- 不用一直在米家 App 和后台之间来回切
+
+当前系统支持的登录流程包括：
+
+- 账号密码登录
+- 会话方式登录
+- 邮箱验证码验证流程
+
+这意味着它不只是一个静态展示面板，而是真的带设备接入能力。
+
+### 2. 首页仪表盘直接看全局状态
+
+用户打开系统后，第一眼看到的是仪表盘，不需要先点很多层菜单。
+
+仪表盘能直接看到：
+
+- 今日总用电
+- 今日总费用
+- 在线 / 离线设备数量
+- 未处理报警数量
+- 最新一条报警信息
+- 每个房间当前实时功率
+- 每个房间今天已经用了多少电
+- 每个房间当前日限额是多少
+- 每个房间当前是否已经断电
+- 每个房间的限额断电开关是否开启
+
+也就是说，用户一进系统，不是只看到几个空壳数字，而是能马上知道“现在哪几个房间在耗电、哪个房间快超额、哪个房间已经断电、现在要不要处理报警”。
+
+### 3. 每个房间都能单独管理
+
+系统不是按“一个总表”那种粗放方式做的，而是按房间 / 空间维度管理。
+
+每个房间卡片上都能直接做这些操作：
+
+- 修改空间名称
+- 查看实时功率
+- 查看累计电量
+- 查看今日用电 / 日限额
+- 修改日限额
+- 开启或关闭限额断电
+- 手动立即断电
+- 点击进入详情页看完整历史数据
+
+这点对真实使用很关键，因为多房间场景不是所有房间都一样：
+
+- 有的房间限额要高一点
+- 有的房间只是看数据，不自动断电
+- 有的房间临时要手动断电
+- 有的房间要改成更容易识别的名字
+
+系统现在就是按这种“每个房间都能单独控制”的方式做的。
+
+### 4. 支持自动断电，不只是看数据
+
+很多系统只能“看”，不能“管”。这个项目不一样，它的核心能力之一就是按规则执行。
+
+你可以给每个房间设置单独的每日限额，例如：
+
+- 房间 A：10 kWh / 天
+- 房间 B：8 kWh / 天
+- 房间 C：15 kWh / 天
+
+然后再决定这个房间要不要开启“限额断电”。
+
+开启之后，系统会：
+
+- 实时计算今天已使用电量
+- 达到阈值时触发报警
+- 达到 100% 限额后自动断电
+- 同时写入报警记录和操作日志
+
+这不是“提醒一下算了”，而是真正能触发动作的业务系统。
+
+### 5. 支持次日自动恢复供电
+
+自动断电如果没有恢复机制，用户第二天还得自己一个个去开，那就不完整。
+
+这个系统已经带了“每日清零 + 自动恢复”的完整链路：
+
+- 系统设置里可以配置每日清零时间
+- 到达新的业务日后，系统会执行重置逻辑
+- 前一天因限额自动断电的房间，可以自动恢复供电
+
+所以它不是只做了前半段“断电”，而是把“断电 -> 次日恢复”整套流程都考虑到了。
+
+### 6. 电量统计不是假估算，而是尽量走真实累计值
+
+这个项目比较重要的一点是：用电统计不是单纯拿瞬时功率乘时间瞎估。
+
+系统会尽量基于设备真实累计电量数据来做统计，尽量避免这些常见问题：
+
+- 实时功率波动导致统计误差越来越大
+- 页面没开着就不记录
+- 刷新一次才跳一次数值
+- 当天数据和设备真实表计对不上
+
+现在系统提供的统计能力包括：
+
+- 今日用电
+- 昨日对比
+- 本月累计
+- 本年累计
+- 24 小时曲线
+- 最近 7 天曲线
+- 最近 30 天曲线
+- 最近 12 个月曲线
+- 房间排行
+- 费用趋势
+
+也就是说，用户不是只能看“当前 300W”，而是能知道：
+
+- 今天已经用了多少度
+- 最近几天变化怎么样
+- 哪个房间最耗电
+- 大概花了多少钱
+
+### 7. 图表页不是摆设，是真能看趋势
+
+系统专门有图表页，不是把所有东西都堆在首页。
+
+图表页可以用来做这些事：
+
+- 看日 / 周 / 月 / 年不同维度的趋势
+- 看各房间排行
+- 看电量变化和费用变化
+- 对比最近一段时间哪些房间更耗电
+
+这对“运营型使用场景”很有用，比如：
+
+- 房东 / 管理员想看整体能耗变化
+- 想发现哪几间最近异常增加
+- 想知道限额策略是不是有效
+
+### 8. 房间详情页看单个房间的完整数据
+
+首页卡片负责“快速看和快速操作”，房间详情页负责“看完整信息”。
+
+进入房间详情后，用户可以看到：
+
+- 当前实时功率
+- 电压 / 电流等实时数据
+- 今日用电
+- 昨日 / 本月 / 本年对比
+- 24 小时曲线
+- 7 天曲线
+- 30 天曲线
+- 12 个月曲线
+- 设备状态
+- 当前断电 / 供电状态
+
+同时还能直接执行：
+
+- 手动断电
+- 恢复供电
+- 修改名称
+
+所以房间详情页不是一个空页面，而是每个房间的完整档案页。
+
+### 9. 带报警中心，不是出事了只能自己盯
+
+系统支持按用电比例自动报警，目前内置的阈值逻辑包括：
+
+- 80% 预警
+- 90% 预警
+- 95% 预警
+
+报警触发后，系统会做这些事：
+
+- 在仪表盘显示最新报警
+- 在侧边栏显示未处理报警数量
+- 在报警中心中记录详细内容
+- 支持后续处理 / 标记解决
+
+这意味着管理员不用一直自己盯着每张卡片看颜色变化，系统会主动把异常抛出来。
+
+### 10. 带操作日志，后期排查有据可查
+
+系统会记录关键操作，不是出了问题就只能猜。
+
+目前会记录的动作包括：
+
+- 登录
+- 设备同步
+- 修改限额
+- 修改报警
+- 手动断电
+- 自动断电
+- 恢复供电
+- 更新系统设置
+
+日志页支持按条件筛选，适合这些场景：
+
+- 排查是谁改了哪个房间的限额
+- 确认某次断电是手动还是自动触发
+- 看某天是否真的发生过恢复供电
+
+### 11. 时区按业务场景走，不死绑国内时间
+
+因为米家云侧数据来源带有它自己的时间体系，如果直接照搬，海外场景容易出现错位。
+
+所以当前系统做了业务时区处理，默认按：
+
+- `Europe/Vienna`
+
+来计算这些内容：
+
+- 今日统计
+- 最近 24 小时曲线
+- 日切换
+- 月切换
+- 每日清零
+- 自动恢复供电
+
+这对于欧洲场景尤其重要，不然用户看到的“今天”和真实本地今天对不上。
+
+### 12. 手机端可以直接用
+
+这个项目已经做了响应式适配，不是只能在桌面大屏上看。
+
+目前移动端可用的能力包括：
+
+- 仪表盘浏览
+- 房间卡片查看
+- 修改限额
+- 开关限额断电
+- 查看图表
+- 进入房间详情
+- 手动断电 / 恢复供电
+
+也就是说，这个项目本质上是 Web 后台，但手机浏览器打开就能直接操作。
+
+## 页面都有什么
+
+为了让第一次看到项目的人更容易理解，这里把页面直接拆开说。
+
+### 仪表盘
+
+这是系统首页，主要负责“总览 + 快速操作”。
+
+你可以在这里做的事：
+
+- 看整套系统今天的总用电和总费用
+- 看在线 / 离线状态
+- 看最新报警
+- 一键刷新数据
+- 一键开关全部设备电源
+- 一键开关全部限额断电
+- 直接操作单个房间
+
+### 图表页
+
+这是用来观察趋势和排行的页面。
+
+你可以在这里做的事：
+
+- 看整体趋势
+- 看不同时间范围的统计
+- 看房间排行
+- 看费用走势
+
+### 房间详情页
+
+这是单个房间的完整视图。
+
+你可以在这里做的事：
+
+- 看该房间实时状态
+- 看历史图表
+- 做手动断电 / 恢复供电
+- 看今日、本月、本年对比
+
+### 系统设置页
+
+这是后台配置中心。
+
+你可以在这里做的事：
+
+- 设置电价
+- 设置报警阈值
+- 设置业务时区
+- 设置每日清零时间
+- 登录米家账号
+- 执行设备同步
+
+### 报警中心
+
+这是所有报警的集中处理页。
+
+你可以在这里做的事：
+
+- 查看未处理报警
+- 按房间筛选
+- 按时间筛选
+- 标记已处理
+
+### 操作日志
+
+这是所有关键操作的审计页。
+
+你可以在这里做的事：
+
+- 看最近谁做了什么
+- 查什么时候断过电
+- 查什么时候恢复供电
+- 查谁修改了设置和限额
+
+## 谁适合用这个系统
+
+这套系统适合的场景很明确：
+
+- 公寓房间用电统一管理
+- 分租房按房间限额控制
+- 宿舍按空间进行断电和恢复
+- 海外场景下接入中国区米家设备
+- 希望把“看数据”和“控制电源”放在同一个后台里
+
+如果你的场景是“只有一个房间、只偶尔看看米家 App”，那这个系统就偏重了。
+
+如果你的场景是“多个房间、多个设备、需要长期管控”，那它就是为这种情况做的。
+
+## 系统截图
 
 ![ZHIRAI dashboard overview](./docs/images/zhirai-dashboard-overview.png)
 
-## Project Structure
+## 技术栈
 
-- `client/` frontend application
-- `server/` backend API and sync logic
-- `shared/` shared package
-- `deploy/remote/` remote deployment configuration
+### 前端
 
-## Local Development
+- React
+- TypeScript
+- Vite
+- Tailwind CSS
+- TanStack Query
+- Zustand
+- ECharts
 
-1. Install dependencies:
+### 后端
+
+- Node.js
+- Express
+- Prisma
+- PostgreSQL
+- Redis
+- Socket.IO
+- node-cron
+
+### 部署方式
+
+- Docker
+- Docker Compose
+
+## 项目目录
+
+```text
+client/          Web 前端
+server/          API、米家接入、实时计算、定时任务、业务逻辑
+shared/          前后端共享类型
+deploy/remote/   远程部署配置
+docs/images/     README 展示图片
+```
+
+## 快速开始
+
+### 1. 安装依赖
 
 ```bash
 npm install
 ```
 
-2. Copy the backend env template and fill your own values:
+### 2. 配置环境变量
+
+后端环境变量模板在：
+
+- `server/.env.example`
+
+你需要复制一份作为自己的本地配置：
 
 ```bash
 cp server/.env.example server/.env
 ```
 
-3. Start development:
+至少要配置这些内容：
+
+- `DATABASE_URL`
+- `REDIS_URL`
+- `JWT_SECRET`
+- `PORT`
+- `CORS_ORIGIN`
+- `XIAOMI_USERNAME`
+- `XIAOMI_PASSWORD`
+
+注意两点：
+
+- 真实账号密码只放在你自己的 `.env` 或服务器环境变量里
+- 不要把真实凭据提交进仓库
+
+### 3. 本地开发启动
 
 ```bash
 npm run dev
 ```
 
-Frontend runs on `http://localhost:3000` and backend runs on `http://localhost:3001`.
+默认端口：
 
-## Docker
+- 前端：`http://localhost:3000`
+- 后端：`http://localhost:3001`
 
-Start the full stack:
+## Docker 部署
+
+如果你要容器化运行整套服务，可以直接：
 
 ```bash
 docker compose up -d
 ```
 
-Before starting Docker, configure your own Xiaomi account credentials through environment variables or an untracked `.env` file. Do not put real credentials directly into committed compose files.
+推荐的生产部署思路是：
 
-## Notes
+- PostgreSQL 做持久化
+- Redis 做缓存和状态存储
+- 后端走容器部署
+- 前端构建后走静态托管或 Web 服务器托管
 
-- Do not commit real `.env` files or Xiaomi account credentials.
-- Energy statistics are designed around real cumulative meter values instead of local estimated accumulation.
+## 业务逻辑说明
+
+### 自动断电逻辑
+
+- 每个房间可以单独设置日限额
+- 每个房间可以单独决定是否开启限额断电
+- 开启后，达到 100% 限额会自动断电
+
+### 报警逻辑
+
+- 80%、90%、95% 会逐级触发报警
+- 报警会显示在仪表盘、侧边栏和报警中心
+
+### 自动恢复逻辑
+
+- 系统按每日清零时间切换到新的一天
+- 自动断电的房间可在次日恢复供电
+
+### 实时刷新逻辑
+
+- 仪表盘会持续刷新关键状态
+- 房间详情页也会同步最新数据
+- 报警和操作结果会及时反映到前端
+
+## 联系信息
+
+### 技术支持
+
+- [xtang3125@gmail.com](mailto:xtang3125@gmail.com)
+
+### 商务合作
+
+- [txq@zhinian-ai.com](mailto:txq@zhinian-ai.com)
+
+### Discord
+
+- `https://discord.gg/uQRzb53R`
+
+### QQ群
+
+- `147594586`
+
+### QQ群链接
+
+- `https://qm.qq.com/q/jGGRuz368w`
 
 ## License
 
-This repository is published as source-available software under [`PolyForm Noncommercial 1.0.0`](./LICENSE).
+本项目采用 [`PolyForm Noncommercial 1.0.0`](./LICENSE)。
 
-- Allowed: personal study, research, testing, noncommercial learning, and noncommercial modification.
-- Not allowed: commercial use, paid redistribution, or using this repository in commercial products or services without separate permission.
+- 允许：个人学习、研究、测试、非商用修改
+- 禁止：商业使用、付费分发、直接用于商业产品或商业服务
