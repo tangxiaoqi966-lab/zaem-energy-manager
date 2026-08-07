@@ -1,7 +1,7 @@
 {
   "name": "zhirai-apartment-energy-manager",
   "version": "1.0.0",
-  "description": "ZHIRAI Apartment Energy Manager (ZAEM) - Apartment Intelligent Power Management System",
+  "description": "ZHIRAI Apartment Energy Manager - Xiaomi Mi Home Apartment Intelligent Power Management System",
   "private": true,
   "workspaces": [
     "server",

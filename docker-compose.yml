@@ -51,8 +51,8 @@ services:
       JWT_SECRET: zaem_jwt_secret_change_in_production
       PORT: 3001
       CORS_ORIGIN: http://localhost:3010
-      XIAOMI_USERNAME: "xtang3125@gmail.com"
-      XIAOMI_PASSWORD: "xtang950825qi"
+      XIAOMI_USERNAME: ${XIAOMI_USERNAME:-}
+      XIAOMI_PASSWORD: ${XIAOMI_PASSWORD:-}
     depends_on:
       postgres:
         condition: service_healthy

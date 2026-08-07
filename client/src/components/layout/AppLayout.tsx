@@ -68,7 +68,7 @@ export function AppLayout() {
     setSidebarOpen(false);
   }, [location.pathname, setSidebarOpen]);
 
-  const initials = user?.name?.slice(0, 2).toUpperCase() || 'ZA';
+  const initials = user?.name?.slice(0, 2).toUpperCase() || 'ZH';
   const roleLabel =
     user?.role === UserRole.ADMIN
       ? '超级管理员'
@@ -94,7 +94,7 @@ export function AppLayout() {
         )}
       >
         <div className="flex h-16 items-center justify-between px-4">
-          <span className="text-xl font-bold tracking-tight">ZAEM</span>
+          <span className="text-xl font-bold tracking-tight">ZHIRAI</span>
         </div>
 
         <Separator />
