@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { LayoutDashboard, BarChart3, Power, RefreshCw, ShieldAlert, BellRing } from 'lucide-react';
+import { LayoutDashboard, BarChart3, Power, RefreshCw, ShieldAlert, BellRing, ZapOff } from 'lucide-react';
 import { toast } from 'sonner';
 import * as api from '@/lib/api';
 import { getSocket } from '@/lib/socket';
@@ -11,6 +11,7 @@ import { RoomsGrid, type DashboardSpaceCard } from '@/components/dashboard/Rooms
 import { Separator } from '@/components/ui/separator';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { Card, CardContent } from '@/components/ui/card';
 import { useAuthStore } from '@/store/auth';
 import {
   Dialog,
@@ -21,6 +22,7 @@ import {
 } from '@/components/ui/dialog';
 
 export function DashboardPage() {
+  const DASHBOARD_ALARM_DISPLAY_MS = 12000;
   const queryClient = useQueryClient();
   const role = useAuthStore((state) => state.role);
   const canControl = role === UserRole.ADMIN || role === UserRole.BOSS;
@@ -29,6 +31,7 @@ export function DashboardPage() {
   const [limitPending, setLimitPending] = useState(false);
   const [confirmPowerOffOpen, setConfirmPowerOffOpen] = useState(false);
   const [confirmLimitOffOpen, setConfirmLimitOffOpen] = useState(false);
+  const [showLatestAlarm, setShowLatestAlarm] = useState(false);
 
   const { data: summary, isLoading: summaryLoading } = useQuery<DashboardSummary>({
     queryKey: ['dashboard'],
@@ -141,10 +144,34 @@ export function DashboardPage() {
   }, [summary]);
   const latestAlarm = unresolvedAlarms?.items?.[0];
   const unresolvedAlarmCount = Number(unresolvedAlarms?.total ?? 0);
+  const cutoffRooms = useMemo(
+    () =>
+      (summary?.roomData ?? [])
+        .filter((room) => room.cutoff)
+        .map((room) => room.displayName || room.roomNumber)
+        .filter(Boolean),
+    [summary],
+  );
   const latestAlarmBadgeVariant =
     latestAlarm?.level === AlarmLevel.CRITICAL || latestAlarm?.level === AlarmLevel.DANGER
       ? 'destructive'
       : 'default';
+
+  useEffect(() => {
+    if (!latestAlarm?.id) {
+      setShowLatestAlarm(false);
+      return;
+    }
+
+    setShowLatestAlarm(true);
+    const timer = window.setTimeout(() => {
+      setShowLatestAlarm(false);
+    }, DASHBOARD_ALARM_DISPLAY_MS);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [latestAlarm?.id]);
 
   const refreshDashboard = async () => {
     try {
@@ -260,15 +287,53 @@ export function DashboardPage() {
         <StatsCards summary={summary} pricePerKwh={pricePerKwh} />
       )}
 
-      {latestAlarm ? (
-        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          <BellRing className="h-4 w-4 shrink-0" />
-          <Badge variant={latestAlarmBadgeVariant} className="shrink-0">
-            {unresolvedAlarmCount > 1 ? `最新报警 · 共 ${unresolvedAlarmCount} 条` : '最新报警'}
-          </Badge>
-          <span className="min-w-0 flex-1 truncate">
-            {latestAlarm.displayName ?? latestAlarm.roomNumber ?? '未知房间'}：{latestAlarm.message}
-          </span>
+      {(showLatestAlarm && latestAlarm) || cutoffRooms.length > 0 ? (
+        <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+          {showLatestAlarm && latestAlarm ? (
+            <Card className="border-red-200 bg-red-50/80">
+              <CardContent className="flex items-start gap-2 p-2.5">
+                <div className="rounded-md bg-red-100 p-1.5 text-red-600">
+                  <BellRing className="h-4 w-4" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="text-xs font-semibold text-red-700">最新报警</span>
+                    <Badge variant={latestAlarmBadgeVariant} className="shrink-0 text-[10px]">
+                      {unresolvedAlarmCount > 1 ? `${unresolvedAlarmCount} 条` : '1 条'}
+                    </Badge>
+                  </div>
+                  <div className="truncate text-sm font-medium text-red-800">
+                    {latestAlarm.displayName ?? latestAlarm.roomNumber ?? '未知房间'}
+                  </div>
+                  <div className="line-clamp-2 text-xs text-red-700">
+                    {latestAlarm.message}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
+
+          {cutoffRooms.length > 0 ? (
+            <Card className="border-amber-200 bg-amber-50/80">
+              <CardContent className="flex items-start gap-2 p-2.5">
+                <div className="rounded-md bg-amber-100 p-1.5 text-amber-700">
+                  <ZapOff className="h-4 w-4" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="mb-1 flex items-center gap-2">
+                    <span className="text-xs font-semibold text-amber-800">已断电房间</span>
+                    <Badge variant="warning" className="shrink-0 text-[10px]">
+                      {cutoffRooms.length} 个
+                    </Badge>
+                  </div>
+                  <div className="text-xs text-amber-800">
+                    {cutoffRooms.slice(0, 3).map((roomName) => `${roomName} 已断电`).join('，')}
+                    {cutoffRooms.length > 3 ? `，另有 ${cutoffRooms.length - 3} 个房间` : ''}
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
         </div>
       ) : null}
 
