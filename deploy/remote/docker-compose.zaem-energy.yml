@@ -15,15 +15,12 @@ services:
     restart: always
     depends_on:
       - zaem-energy-redis
+    env_file:
+      - ../../.env
     environment:
       NODE_ENV: production
-      DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://zaem-energy-redis:6379
-      JWT_SECRET: ${JWT_SECRET}
       PORT: 3001
-      CORS_ORIGIN: ${CORS_ORIGIN}
-      XIAOMI_USERNAME: ${XIAOMI_USERNAME}
-      XIAOMI_PASSWORD: ${XIAOMI_PASSWORD}
     ports:
       - "127.0.0.1:3011:3001"
     networks:

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Bell, Check, Search, RefreshCw } from 'lucide-react'
+import { Bell, Check, Search, RefreshCw, Trash2 } from 'lucide-react'
 import { Card, CardContent } from '../components/ui/card'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
@@ -105,6 +105,31 @@ const getAlarmLevelLabel = (level: AlarmLevel): string => {
   }
 }
 
+const isWarningAlarm = (type: AlarmType): boolean =>
+  type === AlarmType.LIMIT_80 ||
+  type === AlarmType.LIMIT_90 ||
+  type === AlarmType.LIMIT_95
+
+const getAlarmStatusLabel = (item: AlarmLogResponse): string => {
+  if (item.resolved) {
+    return '已闭环'
+  }
+  return isWarningAlarm(item.type) ? '待关注' : '待处理'
+}
+
+const getAlarmActionLabel = (item: AlarmLogResponse): string => {
+  return isWarningAlarm(item.type) ? '标记已读' : '标记处理'
+}
+
+const getAlarmStatusVariant = (
+  item: AlarmLogResponse
+): 'secondary' | 'default' | 'destructive' => {
+  if (item.resolved) {
+    return 'secondary'
+  }
+  return isWarningAlarm(item.type) ? 'default' : 'destructive'
+}
+
 const formatDateTime = (dateStr: string): string => {
   try {
     return new Intl.DateTimeFormat('zh-CN', {
@@ -150,6 +175,7 @@ export function AlarmCenterPage() {
   const [filters, setFilters] = useState<Filters>(DEFAULT_FILTERS)
   const [appliedFilters, setAppliedFilters] = useState<Filters>(DEFAULT_FILTERS)
   const [resolvingId, setResolvingId] = useState<string | null>(null)
+  const [isClearing, setIsClearing] = useState(false)
 
   const resolvedParam: boolean | undefined =
     activeTab === 'all' ? undefined : activeTab === 'resolved'
@@ -189,6 +215,33 @@ export function AlarmCenterPage() {
     },
   })
 
+  const clearMutation = useMutation({
+    mutationFn: (payload: {
+      type?: AlarmType
+      level?: AlarmLevel
+      roomNumber?: string
+      startDate?: string
+      endDate?: string
+      resolved?: boolean
+    }) => logs.clearAlarms(payload),
+    onSuccess: (result) => {
+      const deletedCount = Number(result?.deletedCount ?? 0)
+      toast.success(
+        deletedCount > 0 ? `已清除 ${deletedCount} 条报警记录` : '没有可清除的报警记录'
+      )
+      queryClient.invalidateQueries({ queryKey: ['alarms'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard-unresolved-alarms'] })
+      queryClient.invalidateQueries({ queryKey: ['sidebar-alarm-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] })
+    },
+    onError: (error: Error) => {
+      toast.error(error?.message || '清除失败')
+    },
+    onSettled: () => {
+      setIsClearing(false)
+    },
+  })
+
   useEffect(() => {
     const socket = getSocket()
     const handler = () => {
@@ -219,6 +272,29 @@ export function AlarmCenterPage() {
   const handleResolve = (id: string) => {
     setResolvingId(id)
     resolveMutation.mutate(id)
+  }
+
+  const handleClear = () => {
+    const scopeLabel =
+      activeTab === 'all'
+        ? '当前筛选下的全部报警记录'
+        : activeTab === 'unresolved'
+          ? '当前筛选下的待处理报警记录'
+          : '当前筛选下的已闭环报警记录'
+
+    if (!window.confirm(`确认清除${scopeLabel}吗？此操作不可恢复。`)) {
+      return
+    }
+
+    setIsClearing(true)
+    clearMutation.mutate({
+      type: appliedFilters.type !== 'all' ? (appliedFilters.type as AlarmType) : undefined,
+      level: appliedFilters.level !== 'all' ? (appliedFilters.level as AlarmLevel) : undefined,
+      roomNumber: appliedFilters.roomNumber !== 'all' ? appliedFilters.roomNumber : undefined,
+      startDate: appliedFilters.startDate || undefined,
+      endDate: appliedFilters.endDate || undefined,
+      resolved: resolvedParam,
+    })
   }
 
   const handlePrev = () => {
@@ -279,10 +355,8 @@ export function AlarmCenterPage() {
                 <TableCell>{item.displayName ?? item.roomNumber ?? '-'}</TableCell>
                 <TableCell className="text-sm">{item.message}</TableCell>
                 <TableCell>
-                  <Badge
-                    variant={item.resolved ? 'secondary' : 'destructive'}
-                  >
-                    {item.resolved ? '已解决' : '未解决'}
+                  <Badge variant={getAlarmStatusVariant(item)}>
+                    {getAlarmStatusLabel(item)}
                   </Badge>
                 </TableCell>
                 <TableCell>
@@ -298,7 +372,7 @@ export function AlarmCenterPage() {
                       ) : (
                         <Check className="mr-1 h-3 w-3" />
                       )}
-                      标记解决
+                      {getAlarmActionLabel(item)}
                     </Button>
                   ) : null}
                 </TableCell>
@@ -341,13 +415,14 @@ export function AlarmCenterPage() {
         报警中心
       </h1>
       <p className="text-muted-foreground mb-6">
-        查看和处理系统产生的各类报警信息，包括用电预警、设备离线和异常用电等。
+        这里记录的是预警与异常状态。80% / 90% / 95% 属于预警提醒；达到限额并且系统已自动断电后，会自动闭环，不再要求手工处理。
       </p>
 
       <Card className="mb-6">
         <CardContent className="pt-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 items-end">
-            <div className="space-y-2">
+          <div className="overflow-x-auto">
+            <div className="flex min-w-max items-end gap-4">
+              <div className="w-40 space-y-2">
               <Label htmlFor="alarm-type">报警类型</Label>
               <Select
                 value={filters.type}
@@ -366,9 +441,9 @@ export function AlarmCenterPage() {
                   ))}
                 </SelectContent>
               </Select>
-            </div>
+              </div>
 
-            <div className="space-y-2">
+              <div className="w-36 space-y-2">
               <Label htmlFor="alarm-level">报警级别</Label>
               <Select
                 value={filters.level}
@@ -387,9 +462,9 @@ export function AlarmCenterPage() {
                   ))}
                 </SelectContent>
               </Select>
-            </div>
+              </div>
 
-            <div className="space-y-2">
+              <div className="w-32 space-y-2">
               <Label htmlFor="alarm-room">房间号</Label>
               <Select
                 value={filters.roomNumber}
@@ -409,9 +484,9 @@ export function AlarmCenterPage() {
                   ))}
                 </SelectContent>
               </Select>
-            </div>
+              </div>
 
-            <div className="space-y-2">
+              <div className="w-40 space-y-2">
               <Label htmlFor="alarm-start">开始日期</Label>
               <Input
                 id="alarm-start"
@@ -421,9 +496,9 @@ export function AlarmCenterPage() {
                   setFilters((prev) => ({ ...prev, startDate: e.target.value }))
                 }
               />
-            </div>
+              </div>
 
-            <div className="space-y-2">
+              <div className="w-40 space-y-2">
               <Label htmlFor="alarm-end">结束日期</Label>
               <Input
                 id="alarm-end"
@@ -433,21 +508,36 @@ export function AlarmCenterPage() {
                   setFilters((prev) => ({ ...prev, endDate: e.target.value }))
                 }
               />
-            </div>
-          </div>
+              </div>
 
-          <div className="flex gap-3 mt-6 justify-end">
-            <Button variant="outline" onClick={handleReset}>
-              重置
-            </Button>
-            <Button onClick={handleSearch} disabled={isFetching}>
-              {isFetching ? (
-                <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Search className="mr-2 h-4 w-4" />
-              )}
-              查询
-            </Button>
+              {canResolve ? (
+                <Button
+                  variant="destructive"
+                  onClick={handleClear}
+                  disabled={isFetching || isClearing}
+                  className="shrink-0"
+                >
+                  {isClearing ? (
+                    <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Trash2 className="mr-2 h-4 w-4" />
+                  )}
+                  清除记录
+                </Button>
+              ) : null}
+
+              <Button variant="outline" onClick={handleReset} className="shrink-0">
+                重置
+              </Button>
+              <Button onClick={handleSearch} disabled={isFetching} className="shrink-0">
+                {isFetching ? (
+                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Search className="mr-2 h-4 w-4" />
+                )}
+                查询
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -462,8 +552,8 @@ export function AlarmCenterPage() {
             <div className="px-6 pt-4">
               <TabsList>
                 <TabsTrigger value="all">全部</TabsTrigger>
-                <TabsTrigger value="unresolved">未解决</TabsTrigger>
-                <TabsTrigger value="resolved">已解决</TabsTrigger>
+                <TabsTrigger value="unresolved">待关注/待处理</TabsTrigger>
+                <TabsTrigger value="resolved">已闭环</TabsTrigger>
               </TabsList>
             </div>
 

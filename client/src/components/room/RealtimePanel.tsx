@@ -14,6 +14,7 @@ import { Progress } from '@/components/ui/progress';
 import { cn } from '@/lib/utils';
 import { ValueWithUnit } from '@/components/ui/value-with-unit';
 import { FeeHint } from '@/components/ui/fee-hint';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 
 interface RealtimePanelProps {
   realtime: RealtimeEnergyData;
@@ -156,12 +157,30 @@ export function RealtimePanel({
           label="状态"
           value={ROOM_STATUS_TEXT[realtime.status]}
           extra={
-            <Badge
-              variant={getBadgeVariant(realtime.status)}
-              className="mt-2 inline-flex"
-            >
-              {realtime.deviceOnline ? '设备在线' : '设备离线'}
-            </Badge>
+            realtime.deviceOnline ? (
+              <Badge
+                variant={getBadgeVariant(realtime.status)}
+                className="mt-2 inline-flex"
+              >
+                设备在线
+              </Badge>
+            ) : (
+              <TooltipProvider delayDuration={150}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Badge
+                      variant={getBadgeVariant(realtime.status)}
+                      className="mt-2 inline-flex cursor-help"
+                    >
+                      设备离线
+                    </Badge>
+                  </TooltipTrigger>
+                  <TooltipContent className="max-w-[260px] text-xs leading-5">
+                    设备已离线，请检查上一级控开及总电源。
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )
           }
         />
       </div>

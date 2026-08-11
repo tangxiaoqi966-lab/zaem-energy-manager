@@ -74,8 +74,9 @@ export function DashboardPage() {
 
   const displayCards = useMemo<DashboardSpaceCard[]>(() => {
     if (!summary) return [];
-
-    const roomCards = summary.roomData
+    const roomData = Array.isArray(summary.roomData) ? summary.roomData : [];
+    const devices = Array.isArray(summary.devices) ? summary.devices : [];
+    const roomCards = roomData
       .filter((room) => room.devices.length > 0)
       .map((room, index) => {
         const mainDevice = room.devices[0];
@@ -103,7 +104,7 @@ export function DashboardPage() {
       roomCards.flatMap((room) => room.devices.map((device) => device.did)),
     );
 
-    const deviceFallbackCards = summary.devices
+    const deviceFallbackCards = devices
       .filter((device) => !roomDidSet.has(device.did))
       .map((device, index) => ({
         key: device.did,
@@ -128,11 +129,13 @@ export function DashboardPage() {
   }, [summary]);
   const pricePerKwh = settings?.pricePerKwh ?? 0.6;
   const allDevicesPoweredOn = useMemo(() => {
-    if (!summary?.devices?.length) return false;
+    if (!Array.isArray(summary?.devices) || !summary.devices.length) return false;
     return summary.devices.every((device) => device.power === true);
   }, [summary]);
   const allLimitsEnabled = useMemo(() => {
-    const rooms = summary?.roomData?.filter((room) => room.devices.length > 0) ?? [];
+    const rooms = Array.isArray(summary?.roomData)
+      ? summary.roomData.filter((room) => room.devices.length > 0)
+      : [];
     if (!rooms.length) return false;
     return rooms.every((room) => room.limitEnabled);
   }, [summary]);

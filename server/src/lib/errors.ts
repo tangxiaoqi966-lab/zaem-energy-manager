@@ -28,6 +28,8 @@ export const errorHandler = (
     });
   }
 
+  console.error('[errorHandler] unexpected error:', err?.stack || err);
+
   return res.status(500).json({
     code: 'INTERNAL_ERROR',
     message: '服务器内部错误',

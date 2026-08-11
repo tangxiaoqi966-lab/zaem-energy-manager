@@ -1,11 +1,15 @@
 import { OperationType, AlarmType, AlarmLevel } from '@prisma/client';
 import { prisma } from './prisma';
+import {
+  OperationDetailsPayload,
+  serializeOperationDetails,
+} from './operation-log';
 
 export const writeOperation = async (
   userId: string | null,
   type: OperationType,
   roomId: string | null,
-  details: string,
+  details: string | OperationDetailsPayload,
   success: boolean = true
 ) => {
   return prisma.operationLog.create({
@@ -13,7 +17,7 @@ export const writeOperation = async (
       userId,
       type,
       roomId,
-      details,
+      details: serializeOperationDetails(details),
       success,
     },
   });

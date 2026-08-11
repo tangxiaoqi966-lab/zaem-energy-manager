@@ -5,6 +5,7 @@ import { writeOperation } from '../../lib/logger';
 import { xiaomiAdapter } from './xiaomi.adapter';
 import { broadcastDashboard } from '../../lib/socket';
 import { DEFAULT_BUSINESS_TIMEZONE, normalizeBusinessTimeZone } from '../../lib/business-time';
+import { OperationActorContext } from '../../lib/operation-log';
 
 const DEFAULT_SETTINGS: SystemSettingsData = {
   alarmRatio80: 0.8,
@@ -68,6 +69,7 @@ class SystemService {
   public async updateSettings(
     partial: Partial<SystemSettingsData>,
     operatorUserId: string | null,
+    actorContext?: OperationActorContext,
   ): Promise<SystemSettingsData> {
     const entries = Object.entries(partial) as [SettingsKey, SystemSettingsData[SettingsKey]][];
 
@@ -91,7 +93,13 @@ class SystemService {
       operatorUserId,
       OperationType.update_settings,
       null,
-      JSON.stringify(partial),
+      {
+        action: 'update_settings',
+        actionLabel: '修改系统设置',
+        source: actorContext?.source,
+        sourceLabel: actorContext?.sourceLabel,
+        settings: partial as Record<string, unknown>,
+      },
       true,
     );
 
@@ -130,8 +138,11 @@ class SystemService {
     return numValue as SystemSettingsData[K];
   }
 
-  public async syncXiaomiDevices(operatorUserId: string): Promise<boolean> {
-    await xiaomiAdapter.syncDevicesToDb(operatorUserId);
+  public async syncXiaomiDevices(
+    operatorUserId: string,
+    actorContext?: OperationActorContext,
+  ): Promise<boolean> {
+    await xiaomiAdapter.syncDevicesToDb(operatorUserId, actorContext);
     return true;
   }
 
@@ -139,6 +150,7 @@ class SystemService {
     did: string,
     name: string,
     operatorUserId: string | null,
+    actorContext?: OperationActorContext,
   ): Promise<{ did: string; name: string }> {
     const nextName = name.trim();
 
@@ -160,7 +172,14 @@ class SystemService {
       operatorUserId,
       OperationType.update_settings,
       null,
-      JSON.stringify({ action: 'rename_device', did, name: nextName }),
+      {
+        action: 'rename_device',
+        actionLabel: '修改空间名称',
+        source: actorContext?.source,
+        sourceLabel: actorContext?.sourceLabel,
+        did,
+        deviceName: nextName,
+      },
       true,
     );
 
@@ -170,6 +189,7 @@ class SystemService {
   public async bulkControlDevices(
     action: 'on' | 'off',
     operatorUserId: string | null,
+    actorContext?: OperationActorContext,
   ): Promise<{ ok: boolean; action: 'on' | 'off'; total: number; success: number; failed: number }> {
     const devices = await prisma.device.findMany({
       select: { did: true },
@@ -181,9 +201,9 @@ class SystemService {
     for (const device of devices) {
       try {
         if (action === 'on') {
-          await xiaomiAdapter.turnOn(device.did, operatorUserId);
+          await xiaomiAdapter.turnOn(device.did, operatorUserId, actorContext);
         } else {
-          await xiaomiAdapter.turnOff(device.did, operatorUserId);
+          await xiaomiAdapter.turnOff(device.did, operatorUserId, actorContext);
         }
         success += 1;
       } catch {
@@ -198,7 +218,16 @@ class SystemService {
       operatorUserId,
       OperationType.control_device,
       null,
-      JSON.stringify({ action: 'bulk_device_control', powerAction: action, total: devices.length, success, failed }),
+      {
+        action: 'bulk_device_control',
+        actionLabel: action === 'on' ? '批量开启设备电源' : '批量关闭设备电源',
+        source: actorContext?.source,
+        sourceLabel: actorContext?.sourceLabel,
+        powerAction: action,
+        totalCount: devices.length,
+        successCount: success,
+        failedCount: failed,
+      },
       failed === 0,
     );
 

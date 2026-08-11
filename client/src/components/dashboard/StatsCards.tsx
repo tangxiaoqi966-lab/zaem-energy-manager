@@ -53,7 +53,8 @@ function formatCost(value: number) {
 }
 
 export function StatsCards({ summary, pricePerKwh }: StatsCardsProps) {
-  const totalCumulativeKwh = summary.devices.reduce(
+  const devices = Array.isArray(summary.devices) ? summary.devices : [];
+  const totalCumulativeKwh = devices.reduce(
     (sum, device) => sum + (device.totalKwh ?? 0),
     0,
   );

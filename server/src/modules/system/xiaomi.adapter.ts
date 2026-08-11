@@ -4,6 +4,7 @@ import { XiaomiDeviceInfo } from '@shared/index';
 import prisma from '../../lib/prisma';
 import redis from '../../lib/redis';
 import { writeOperation } from '../../lib/logger';
+import { AppError } from '../../lib/errors';
 import axios from 'axios';
 import {
   DEFAULT_BUSINESS_TIMEZONE,
@@ -12,6 +13,7 @@ import {
   getBusinessDayStartUtc,
   getDayKey,
 } from '../../lib/business-time';
+import { OperationActorContext } from '../../lib/operation-log';
 
 interface XiaomiSession {
   userId: string;
@@ -49,6 +51,10 @@ interface DevicePropSnapshot {
   currentA?: number;
   voltageV?: number;
   totalKwh?: number;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export interface XiaomiAuthStatus {
@@ -1183,6 +1189,13 @@ class XiaomiAdapter {
       });
       const data = resp.data;
       console.debug('[XiaomiAdapter] requestIo done:', method, path, 'status=', resp.status, 'code=', typeof data === 'object' && data ? data.code ?? '<ok>' : '<non-obj>');
+      if (resp.status >= 400) {
+        const message =
+          typeof data === 'object' && data
+            ? data?.message || data?.desc || JSON.stringify(data).slice(0, 300)
+            : String(data ?? '');
+        throw new Error(`Xiaomi io HTTP_${resp.status}:${message}`);
+      }
       if (resp.status === 401 || resp.status === 403) {
         const message =
           typeof data === 'object' && data
@@ -1402,6 +1415,51 @@ class XiaomiAdapter {
       { did: device.did, siid: 3, piid: 3 },
       { did: device.did, siid: 3, piid: 6 },
     ]);
+  }
+
+  private async getSingleDeviceSnapshot(
+    session: XiaomiSession,
+    deviceDid: string,
+  ): Promise<DevicePropSnapshot | null> {
+    const device = await prisma.device.findUnique({
+      where: { did: deviceDid },
+      select: { did: true, model: true, status: true },
+    });
+    if (!device) {
+      return null;
+    }
+
+    const snapshots = await this.batchGetProps(session, [
+      {
+        did: device.did,
+        model: device.model,
+        isOnline: true,
+      },
+    ]);
+
+    return snapshots[deviceDid] ?? null;
+  }
+
+  private async confirmDevicePowerState(
+    session: XiaomiSession,
+    deviceDid: string,
+    expectedPower: boolean,
+  ): Promise<DevicePropSnapshot> {
+    const maxAttempts = 4;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const snapshot = await this.getSingleDeviceSnapshot(session, deviceDid);
+      if (snapshot && snapshot.power === expectedPower) {
+        return snapshot;
+      }
+      if (attempt < maxAttempts - 1) {
+        await sleep(2000);
+      }
+    }
+
+    throw new Error(
+      `米家设备状态确认失败，期望电源=${expectedPower ? '开启' : '关闭'}，did=${deviceDid}`,
+    );
   }
 
   private assignPropValue(
@@ -2040,7 +2098,10 @@ class XiaomiAdapter {
     return null;
   }
 
-  public async syncDevicesToDb(operatorUserId: string | null): Promise<void> {
+  public async syncDevicesToDb(
+    operatorUserId: string | null,
+    actorContext?: OperationActorContext,
+  ): Promise<void> {
     await prisma.device.deleteMany({
       where: { did: { startsWith: 'miot_device_' } },
     });
@@ -2095,53 +2156,217 @@ class XiaomiAdapter {
       operatorUserId,
       OperationType.sync_devices,
       null,
-      JSON.stringify({ deviceCount: devices.length, dids: devices.map((d) => d.did) }),
+      {
+        action: 'sync_devices',
+        actionLabel: '同步米家设备',
+        source: actorContext?.source,
+        sourceLabel: actorContext?.sourceLabel,
+        totalCount: devices.length,
+        note: `同步 ${devices.length} 台设备`,
+      },
       true,
     );
   }
 
-  public async turnOn(deviceDid: string, operatorUserId: string | null | undefined): Promise<boolean> {
-    try {
-      const session = await this.getSession();
-      if (session && !/^mock_/.test(session.serviceToken)) {
-        await this.requestIo(session, 'POST', '/device/set_properties', {}, [{
-          did: deviceDid, siid: 2, piid: 1, value: true,
-        }]);
-      }
-    } catch (e: any) {
-      console.warn('[XiaomiAdapter] turnOn 远程调用失败，仅更新本地状态：', e?.message);
-    }
-    await prisma.device.update({ where: { did: deviceDid }, data: { power: true, lastSyncAt: new Date() } });
-    await writeOperation(
-      operatorUserId ?? null,
-      OperationType.control_device,
-      null,
-      JSON.stringify({ did: deviceDid, action: 'turn_on' }),
-      true,
-    );
-    return true;
+  private async getDeviceAuditDetails(deviceDid: string): Promise<{
+    roomId: string | null;
+    roomNumber: string | null;
+    roomName: string | null;
+    displayName: string | null;
+    deviceName: string | null;
+  }> {
+    const device = await prisma.device.findUnique({
+      where: { did: deviceDid },
+      include: {
+        room: {
+          select: {
+            id: true,
+            roomNumber: true,
+            name: true,
+          },
+        },
+      },
+    });
+
+    return {
+      roomId: device?.room?.id ?? null,
+      roomNumber: device?.room?.roomNumber ?? null,
+      roomName: device?.room?.name ?? null,
+      displayName:
+        device?.name?.trim() ||
+        device?.room?.name?.trim() ||
+        device?.room?.roomNumber ||
+        null,
+      deviceName: device?.name?.trim() || null,
+    };
   }
 
-  public async turnOff(deviceDid: string, operatorUserId: string | null | undefined): Promise<boolean> {
+  public async turnOn(
+    deviceDid: string,
+    operatorUserId: string | null | undefined,
+    actorContext?: OperationActorContext,
+  ): Promise<boolean> {
+    const auditTarget = await this.getDeviceAuditDetails(deviceDid);
+
     try {
       const session = await this.getSession();
-      if (session && !/^mock_/.test(session.serviceToken)) {
-        await this.requestIo(session, 'POST', '/device/set_properties', {}, [{
-          did: deviceDid, siid: 2, piid: 1, value: false,
-        }]);
+      if (!session) {
+        throw new AppError(400, 'XIAOMI_NOT_LOGGED_IN', '米家未登录，无法开启设备');
       }
+      if (/^mock_/.test(session.serviceToken)) {
+        throw new AppError(400, 'XIAOMI_SESSION_INVALID', '当前米家会话不是真实会话，无法开启设备');
+      }
+
+      const result = await this.requestIo(session, 'POST', '/app/miotspec/prop/set', {}, {
+        params: [{ did: deviceDid, siid: 2, piid: 1, value: true }],
+      });
+      if (Array.isArray(result)) {
+        const failed = result.find((item) => item?.code !== undefined && Number(item.code) !== 0);
+        if (failed) {
+          throw new Error(`米家返回开启失败 code=${failed.code}`);
+        }
+      }
+      const confirmed = await this.confirmDevicePowerState(session, deviceDid, true);
+      await prisma.device.update({
+        where: { did: deviceDid },
+        data: {
+          power: true,
+          powerW: confirmed.powerW ?? null,
+          currentA: confirmed.currentA ?? null,
+          voltageV: confirmed.voltageV ?? null,
+          totalKwh: confirmed.totalKwh ?? null,
+          lastSyncAt: new Date(),
+        },
+      });
+      await writeOperation(
+        operatorUserId ?? null,
+        OperationType.control_device,
+        auditTarget.roomId,
+        {
+          action: 'turn_on',
+          actionLabel: actorContext?.source === 'system_auto' ? '自动开电' : '手动开电',
+          source: actorContext?.source,
+          sourceLabel: actorContext?.sourceLabel,
+          roomNumber: auditTarget.roomNumber,
+          roomName: auditTarget.roomName,
+          displayName: auditTarget.displayName,
+          deviceName: auditTarget.deviceName,
+          did: deviceDid,
+          powerAction: 'on',
+        },
+        true,
+      );
+      return true;
     } catch (e: any) {
-      console.warn('[XiaomiAdapter] turnOff 远程调用失败，仅更新本地状态：', e?.message);
+      await writeOperation(
+        operatorUserId ?? null,
+        OperationType.control_device,
+        auditTarget.roomId,
+        {
+          action: 'turn_on',
+          actionLabel: actorContext?.source === 'system_auto' ? '自动开电失败' : '手动开电失败',
+          source: actorContext?.source,
+          sourceLabel: actorContext?.sourceLabel,
+          roomNumber: auditTarget.roomNumber,
+          roomName: auditTarget.roomName,
+          displayName: auditTarget.displayName,
+          deviceName: auditTarget.deviceName,
+          did: deviceDid,
+          powerAction: 'on',
+          error: e?.message || String(e),
+        },
+        false,
+      );
+      throw new AppError(
+        e instanceof AppError ? e.statusCode : 502,
+        e instanceof AppError ? e.code : 'XIAOMI_DEVICE_CONTROL_FAILED',
+        e?.message || '米家开启设备失败',
+      );
     }
-    await prisma.device.update({ where: { did: deviceDid }, data: { power: false, lastSyncAt: new Date() } });
-    await writeOperation(
-      operatorUserId ?? null,
-      OperationType.control_device,
-      null,
-      JSON.stringify({ did: deviceDid, action: 'turn_off' }),
-      true,
-    );
-    return true;
+  }
+
+  public async turnOff(
+    deviceDid: string,
+    operatorUserId: string | null | undefined,
+    actorContext?: OperationActorContext,
+  ): Promise<boolean> {
+    const auditTarget = await this.getDeviceAuditDetails(deviceDid);
+
+    try {
+      const session = await this.getSession();
+      if (!session) {
+        throw new AppError(400, 'XIAOMI_NOT_LOGGED_IN', '米家未登录，无法关闭设备');
+      }
+      if (/^mock_/.test(session.serviceToken)) {
+        throw new AppError(400, 'XIAOMI_SESSION_INVALID', '当前米家会话不是真实会话，无法关闭设备');
+      }
+
+      const result = await this.requestIo(session, 'POST', '/app/miotspec/prop/set', {}, {
+        params: [{ did: deviceDid, siid: 2, piid: 1, value: false }],
+      });
+      if (Array.isArray(result)) {
+        const failed = result.find((item) => item?.code !== undefined && Number(item.code) !== 0);
+        if (failed) {
+          throw new Error(`米家返回断电失败 code=${failed.code}`);
+        }
+      }
+      const confirmed = await this.confirmDevicePowerState(session, deviceDid, false);
+      await prisma.device.update({
+        where: { did: deviceDid },
+        data: {
+          power: false,
+          powerW: confirmed.powerW ?? 0,
+          currentA: confirmed.currentA ?? 0,
+          voltageV: confirmed.voltageV ?? null,
+          totalKwh: confirmed.totalKwh ?? null,
+          lastSyncAt: new Date(),
+        },
+      });
+      await writeOperation(
+        operatorUserId ?? null,
+        OperationType.control_device,
+        auditTarget.roomId,
+        {
+          action: 'turn_off',
+          actionLabel: actorContext?.source === 'system_auto' ? '自动断电' : '手动断电',
+          source: actorContext?.source,
+          sourceLabel: actorContext?.sourceLabel,
+          roomNumber: auditTarget.roomNumber,
+          roomName: auditTarget.roomName,
+          displayName: auditTarget.displayName,
+          deviceName: auditTarget.deviceName,
+          did: deviceDid,
+          powerAction: 'off',
+        },
+        true,
+      );
+      return true;
+    } catch (e: any) {
+      await writeOperation(
+        operatorUserId ?? null,
+        OperationType.control_device,
+        auditTarget.roomId,
+        {
+          action: 'turn_off',
+          actionLabel: actorContext?.source === 'system_auto' ? '自动断电失败' : '手动断电失败',
+          source: actorContext?.source,
+          sourceLabel: actorContext?.sourceLabel,
+          roomNumber: auditTarget.roomNumber,
+          roomName: auditTarget.roomName,
+          displayName: auditTarget.displayName,
+          deviceName: auditTarget.deviceName,
+          did: deviceDid,
+          powerAction: 'off',
+          error: e?.message || String(e),
+        },
+        false,
+      );
+      throw new AppError(
+        e instanceof AppError ? e.statusCode : 502,
+        e instanceof AppError ? e.code : 'XIAOMI_DEVICE_CONTROL_FAILED',
+        e?.message || '米家关闭设备失败',
+      );
+    }
   }
 
   public async getRealtimeByRoom(roomId: string): Promise<{

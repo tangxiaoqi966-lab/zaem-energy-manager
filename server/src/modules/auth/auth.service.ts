@@ -6,6 +6,7 @@ import { writeOperation } from '../../lib/logger';
 import { AppError } from '../../lib/errors';
 import { JWT_SECRET } from '../../config/env';
 import { JwtPayload } from '../../middleware/auth';
+import { OperationActorContext } from '../../lib/operation-log';
 
 export interface LoginInput {
   username: string;
@@ -24,20 +25,70 @@ export interface LoginResponse {
   user: UserResponse;
 }
 
-export const login = async (input: LoginInput): Promise<LoginResponse> => {
+export const login = async (
+  input: LoginInput,
+  actorContext?: OperationActorContext,
+): Promise<LoginResponse> => {
+  if (
+    !input ||
+    typeof input.username !== 'string' ||
+    typeof input.password !== 'string' ||
+    !input.username.trim() ||
+    !input.password
+  ) {
+    throw new AppError(400, 'INVALID_LOGIN_INPUT', '用户名和密码不能为空');
+  }
+
   const user = await prisma.user.findUnique({
-    where: { username: input.username },
+    where: { username: input.username.trim() },
     include: { role: true },
   });
 
   if (!user) {
+    await writeOperation(
+      null,
+      OperationType.login,
+      null,
+      {
+        action: 'login_failed',
+        actionLabel: '登录失败',
+        source: actorContext?.source,
+        sourceLabel: actorContext?.sourceLabel,
+        username: input.username.trim(),
+        loginAddress: actorContext?.ip,
+        loginDevice: actorContext?.deviceLabel,
+        userAgent: actorContext?.userAgent,
+        error: '用户名不存在',
+      },
+      false,
+    );
     throw new AppError(401, 'INVALID_CREDENTIALS', '用户名或密码错误');
   }
 
   const isPasswordValid = await bcrypt.compare(input.password, user.passwordHash);
   if (!isPasswordValid) {
-    await writeOperation(user.id, OperationType.login, null, '密码错误', false);
+    await writeOperation(
+      user.id,
+      OperationType.login,
+      null,
+      {
+        action: 'login_failed',
+        actionLabel: '登录失败',
+        source: actorContext?.source,
+        sourceLabel: actorContext?.sourceLabel,
+        username: user.username,
+        loginAddress: actorContext?.ip,
+        loginDevice: actorContext?.deviceLabel,
+        userAgent: actorContext?.userAgent,
+        error: '密码错误',
+      },
+      false,
+    );
     throw new AppError(401, 'INVALID_CREDENTIALS', '用户名或密码错误');
+  }
+
+  if (!user.role) {
+    throw new AppError(500, 'USER_ROLE_INVALID', '当前账号角色数据异常');
   }
 
   const payload: JwtPayload = {
@@ -54,7 +105,23 @@ export const login = async (input: LoginInput): Promise<LoginResponse> => {
     data: { lastLoginAt: new Date() },
   });
 
-  await writeOperation(user.id, OperationType.login, null, '登录成功', true);
+  await writeOperation(
+    user.id,
+    OperationType.login,
+    null,
+    {
+      action: 'login_success',
+      actionLabel: '登录',
+      source: actorContext?.source,
+      sourceLabel: actorContext?.sourceLabel,
+      username: user.username,
+      loginAddress: actorContext?.ip,
+      loginDevice: actorContext?.deviceLabel,
+      userAgent: actorContext?.userAgent,
+      note: '登录成功',
+    },
+    true,
+  );
 
   return {
     token,
@@ -67,8 +134,25 @@ export const login = async (input: LoginInput): Promise<LoginResponse> => {
   };
 };
 
-export const logout = async (userId: string): Promise<void> => {
-  await writeOperation(userId, 'logout', null, '退出登录', true);
+export const logout = async (
+  userId: string,
+  actorContext?: OperationActorContext,
+): Promise<void> => {
+  await writeOperation(
+    userId,
+    OperationType.logout,
+    null,
+    {
+      action: 'logout',
+      actionLabel: '退出登录',
+      source: actorContext?.source,
+      sourceLabel: actorContext?.sourceLabel,
+      loginAddress: actorContext?.ip,
+      loginDevice: actorContext?.deviceLabel,
+      userAgent: actorContext?.userAgent,
+    },
+    true,
+  );
 };
 
 export const getCurrentUser = async (userId: string): Promise<UserResponse> => {

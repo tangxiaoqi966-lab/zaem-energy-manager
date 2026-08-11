@@ -20,25 +20,30 @@ import {
 
 let lastDailyResetDayKey = '';
 
-async function dailyResetTask(): Promise<void> {
-  try {
-    const autoRestorePower = await systemService.getSetting('autoRestorePower', true);
-    if (!autoRestorePower) {
-      return;
-    }
-
-    const cutoffRooms = await prisma.room.findMany({
-      where: { cutoff: true },
-    });
-
-    for (const room of cutoffRooms) {
-      try {
-        await restorePower(room.id, 'SYSTEM_AUTO', true);
-      } catch {
-      }
-    }
-  } catch {
+async function dailyResetTask(): Promise<boolean> {
+  const autoRestorePower = await systemService.getSetting('autoRestorePower', true);
+  if (!autoRestorePower) {
+    return true;
   }
+
+  const cutoffRooms = await prisma.room.findMany({
+    where: { cutoff: true },
+  });
+
+  let allSucceeded = true;
+  for (const room of cutoffRooms) {
+    try {
+      await restorePower(room.id, 'SYSTEM_AUTO', true);
+    } catch (error: any) {
+      allSucceeded = false;
+      console.error(
+        `[dailyResetTask] 自动恢复供电失败 roomId=${room.id}:`,
+        error?.message || error,
+      );
+    }
+  }
+
+  return allSucceeded;
 }
 
 async function accumulateRoomEnergy(roomId: string, businessTimeZone: string): Promise<void> {
@@ -167,7 +172,23 @@ async function syncDataTask(): Promise<void> {
 
         await checkAndTriggerAlarms(room.id);
 
-        if (autoCutoff && !room.cutoff) {
+        if (room.cutoff) {
+          const poweredDevices = room.devices.filter(
+            (device) =>
+              device.status === 'online' &&
+              (device.power === true || Number(device.powerW ?? 0) > 0),
+          );
+
+          if (poweredDevices.length > 0) {
+            try {
+              await cutoffPower(room.id, undefined as any, true);
+            } catch {
+            }
+          }
+          continue;
+        }
+
+        if (autoCutoff) {
           const realtime = await computeRoomRealtime(room);
           if (realtime.limitEnabled && realtime.usagePercent >= 100) {
             try {
@@ -203,11 +224,16 @@ export async function startCronJobs(): Promise<void> {
 
         if (
           currentHour === dailyResetHour &&
-          currentMinute === minute &&
+          currentMinute >= minute &&
           lastDailyResetDayKey !== dayKey
         ) {
-          await dailyResetTask().catch(() => {});
-          lastDailyResetDayKey = dayKey;
+          const resetOk = await dailyResetTask().catch((error) => {
+            console.error('[cron] 执行自动恢复供电失败：', error?.message || error);
+            return false;
+          });
+          if (resetOk) {
+            lastDailyResetDayKey = dayKey;
+          }
         }
 
         await syncDataTask().catch(() => {});

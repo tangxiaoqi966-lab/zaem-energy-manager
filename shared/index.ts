@@ -178,10 +178,12 @@ export interface OperationLogResponse {
   type: OperationType;
   userId: string | null;
   username: string | null;
+  actorLabel?: string | null;
   roomId: string | null;
   roomNumber: string | null;
   displayName?: string | null;
   details: string;
+  detailsText?: string;
   success: boolean;
   createdAt: string;
 }

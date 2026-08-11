@@ -158,8 +158,10 @@ function buildRankingEntries(
   pricePerKwh: number,
 ): RankingEntry[] {
   if (!summary) return [];
+  const roomData = Array.isArray(summary.roomData) ? summary.roomData : [];
+  const devices = Array.isArray(summary.devices) ? summary.devices : [];
 
-  const dayEntries = summary.roomData
+  const dayEntries = roomData
     .filter((room) => room.devices.length > 0)
     .map((room) => {
       const usage = room.yesterdayUsage;
@@ -180,7 +182,7 @@ function buildRankingEntries(
       .slice(0, 14);
   }
 
-  return summary.devices
+  return devices
     .map((device, index) => ({
       key: device.did,
       label: device.name || `设备空间 ${index + 1}`,
@@ -259,7 +261,11 @@ export function ChartsPage() {
   }, []);
 
   const mappedRooms = useMemo(
-    () => summary?.roomData.filter((room) => room.devices.length > 0) ?? [],
+    () => {
+      return Array.isArray(summary?.roomData)
+        ? summary.roomData.filter((room) => room.devices.length > 0)
+        : [];
+    },
     [summary],
   );
 
@@ -292,12 +298,21 @@ export function ChartsPage() {
   );
 
   const totalPowerW = useMemo(
-    () => summary?.devices.reduce((sum, device) => sum + (device.status === 'online' ? device.powerW ?? 0 : 0), 0) ?? 0,
+    () =>
+      (Array.isArray(summary?.devices)
+        ? summary.devices.reduce(
+            (sum, device) => sum + (device.status === 'online' ? device.powerW ?? 0 : 0),
+            0,
+          )
+        : 0),
     [summary],
   );
 
   const totalCumulativeKwh = useMemo(
-    () => summary?.devices.reduce((sum, device) => sum + (device.totalKwh ?? 0), 0) ?? 0,
+    () =>
+      (Array.isArray(summary?.devices)
+        ? summary.devices.reduce((sum, device) => sum + (device.totalKwh ?? 0), 0)
+        : 0),
     [summary],
   );
 

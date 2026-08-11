@@ -28,6 +28,9 @@ import {
   getBusinessDate,
   getDateKey,
 } from '../../lib/business-time';
+import { OperationActorContext } from '../../lib/operation-log';
+
+const ROOM_POWER_ACTION_WINDOW_MS = 3 * 60 * 1000;
 
 const PRISMA_TO_SHARED_DEVICE_STATUS_ENERGY: Record<PrismaDeviceStatus, DeviceStatus> =
   {
@@ -55,6 +58,99 @@ function toDeviceItem(d: any): DeviceItem {
     totalKwh: d.totalKwh ?? null,
     lastSyncAt: d.lastSyncAt ? new Date(d.lastSyncAt).toISOString() : null,
   };
+}
+
+async function assertRoomPowerActionAllowed(
+  roomId: string,
+  actionType: 'cutoff_power' | 'restore_power',
+  operatorUserId: string | null | undefined,
+  auto: boolean,
+  actorContext?: OperationActorContext,
+) {
+  const since = new Date(Date.now() - ROOM_POWER_ACTION_WINDOW_MS);
+  const recentActions = await prisma.operationLog.findMany({
+    where: {
+      roomId,
+      success: true,
+      type: {
+        in: [OperationType.cutoff_power, OperationType.restore_power],
+      },
+      createdAt: {
+        gte: since,
+      },
+    },
+    orderBy: {
+      createdAt: 'desc',
+    },
+    select: {
+      type: true,
+      createdAt: true,
+    },
+  });
+
+  const sameAction = recentActions.find((item) => item.type === actionType);
+  if (sameAction) {
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil(
+        (sameAction.createdAt.getTime() + ROOM_POWER_ACTION_WINDOW_MS - Date.now()) / 1000,
+      ),
+    );
+    const actionLabel = actionType === OperationType.cutoff_power ? '断电' : '恢复供电';
+    const message = `同一房间 3 分钟内不能重复${actionLabel}，请 ${retryAfterSeconds} 秒后再试`;
+
+    await writeOperation(
+      operatorUserId ?? null,
+      actionType,
+      roomId,
+      {
+        action: auto ? `auto_${actionType}` : actionType,
+        actionLabel: actionType === OperationType.cutoff_power ? '断电被拦截' : '恢复供电被拦截',
+        source: auto ? 'system_auto' : actorContext?.source,
+        sourceLabel: auto ? '系统自动' : actorContext?.sourceLabel,
+        blocked: true,
+        reason: 'duplicate_action_in_window',
+        retryAfterSeconds,
+      },
+      false,
+    );
+
+    throw new AppError(429, 'ROOM_POWER_ACTION_COOLDOWN', message, {
+      retryAfterSeconds,
+    });
+  }
+
+  if (recentActions.length >= 2) {
+    const oldestRecentAction = recentActions[recentActions.length - 1];
+    const retryAfterSeconds = Math.max(
+      1,
+      Math.ceil(
+        (oldestRecentAction.createdAt.getTime() + ROOM_POWER_ACTION_WINDOW_MS - Date.now()) /
+          1000,
+      ),
+    );
+    const message = `同一房间 3 分钟内最多只允许 1 次断电和 1 次恢复，请 ${retryAfterSeconds} 秒后再试`;
+
+    await writeOperation(
+      operatorUserId ?? null,
+      actionType,
+      roomId,
+      {
+        action: auto ? `auto_${actionType}` : actionType,
+        actionLabel: actionType === OperationType.cutoff_power ? '断电被拦截' : '恢复供电被拦截',
+        source: auto ? 'system_auto' : actorContext?.source,
+        sourceLabel: auto ? '系统自动' : actorContext?.sourceLabel,
+        blocked: true,
+        reason: 'too_many_actions_in_window',
+        retryAfterSeconds,
+      },
+      false,
+    );
+
+    throw new AppError(429, 'ROOM_POWER_ACTION_COOLDOWN', message, {
+      retryAfterSeconds,
+    });
+  }
 }
 
 export async function computeRoomRealtime(room: {
@@ -260,6 +356,7 @@ export async function updateEnergyLimit(
   dailyLimit: number,
   operatorUserId: string,
   enabled?: boolean,
+  actorContext?: OperationActorContext,
 ) {
   const room = await prisma.room.findUnique({ where: { id: roomId } });
   if (!room) {
@@ -286,7 +383,18 @@ export async function updateEnergyLimit(
     operatorUserId,
     OperationType.update_limit,
     roomId,
-    `更新限额为 ${dailyLimit} kWh/天，自动断电${limit.enabled ? '开启' : '关闭'}`,
+    {
+      action: 'update_limit',
+      actionLabel: '修改日限额',
+      source: actorContext?.source,
+      sourceLabel: actorContext?.sourceLabel,
+      roomNumber: room.roomNumber,
+      roomName: room.name,
+      displayName: room.name || room.roomNumber,
+      dailyLimit,
+      limitEnabled: limit.enabled,
+      note: '更新成功',
+    },
     true,
   );
 
@@ -320,6 +428,7 @@ export async function getEnergyLimits() {
 export async function bulkUpdateLimitEnabled(
   enabled: boolean,
   operatorUserId: string,
+  actorContext?: OperationActorContext,
 ): Promise<{ ok: boolean; enabled: boolean; total: number }> {
   const rooms = await prisma.room.findMany({
     select: {
@@ -346,7 +455,14 @@ export async function bulkUpdateLimitEnabled(
     operatorUserId,
     OperationType.update_limit,
     null,
-    JSON.stringify({ action: 'bulk_limit_enabled', enabled, total: rooms.length }),
+    {
+      action: 'bulk_limit_enabled',
+      actionLabel: enabled ? '批量开启限额断电' : '批量关闭限额断电',
+      source: actorContext?.source,
+      sourceLabel: actorContext?.sourceLabel,
+      limitEnabled: enabled,
+      totalCount: rooms.length,
+    },
     true,
   );
 
@@ -396,53 +512,69 @@ export async function checkAndTriggerAlarms(roomId: string): Promise<RoomStatus>
     return realtime.status;
   }
 
-  const alarmsToCheck: Array<{ type: AlarmType; level: AlarmLevel; threshold: number; message: string }> = [];
-
-  if (percent >= threshold80) {
-    alarmsToCheck.push({
+  const warningAlarms: Array<{
+    type: AlarmType;
+    level: AlarmLevel;
+    threshold: number;
+    message: string;
+  }> = [
+    {
       type: AlarmType.limit_80,
       level: AlarmLevel.warning,
       threshold: threshold80,
       message: `${realtime.displayName}今日用电已超过${threshold80}%限额`,
-    });
-  }
-  if (percent >= threshold90) {
-    alarmsToCheck.push({
+    },
+    {
       type: AlarmType.limit_90,
       level: AlarmLevel.danger,
       threshold: threshold90,
       message: `${realtime.displayName}今日用电已超过${threshold90}%限额`,
-    });
-  }
-  if (percent >= threshold95) {
-    alarmsToCheck.push({
+    },
+    {
       type: AlarmType.limit_95,
       level: AlarmLevel.critical,
       threshold: threshold95,
       message: `${realtime.displayName}今日用电已超过${threshold95}%限额`,
-    });
-  }
+    },
+  ];
 
-  for (const alarm of alarmsToCheck) {
-    const existing = await prisma.alarmLog.findFirst({
+  for (const alarm of warningAlarms) {
+    const shouldKeepOpen = percent >= alarm.threshold && !room.cutoff;
+    if (shouldKeepOpen) {
+      const existing = await prisma.alarmLog.findFirst({
+        where: {
+          roomId,
+          type: alarm.type,
+          resolved: false,
+          createdAt: { gte: today, lt: tomorrow },
+        },
+      });
+      if (!existing) {
+        await prisma.alarmLog.create({
+          data: {
+            type: alarm.type,
+            level: alarm.level,
+            roomId,
+            message: alarm.message,
+            resolved: false,
+          },
+        });
+      }
+      continue;
+    }
+
+    await prisma.alarmLog.updateMany({
       where: {
         roomId,
         type: alarm.type,
         resolved: false,
         createdAt: { gte: today, lt: tomorrow },
       },
+      data: {
+        resolved: true,
+        resolvedAt: new Date(),
+      },
     });
-    if (!existing) {
-      await prisma.alarmLog.create({
-        data: {
-          type: alarm.type,
-          level: alarm.level,
-          roomId,
-          message: alarm.message,
-          resolved: false,
-        },
-      });
-    }
   }
 
   await prisma.room.update({
@@ -453,7 +585,12 @@ export async function checkAndTriggerAlarms(roomId: string): Promise<RoomStatus>
   return realtime.status;
 }
 
-export async function cutoffPower(roomId: string, operatorUserId: string | null | undefined, auto: boolean = false) {
+export async function cutoffPower(
+  roomId: string,
+  operatorUserId: string | null | undefined,
+  auto: boolean = false,
+  actorContext?: OperationActorContext,
+) {
   const room = await prisma.room.findUnique({
     where: { id: roomId },
     include: { devices: true, energyLimit: true },
@@ -462,14 +599,75 @@ export async function cutoffPower(roomId: string, operatorUserId: string | null 
     throw new AppError(404, 'ROOM_NOT_FOUND', '房间不存在');
   }
 
-  let controlSuccess = true;
-  const onlineDevices = room.devices.filter(d => d.status === 'online');
-  for (const device of onlineDevices) {
+  await assertRoomPowerActionAllowed(
+    roomId,
+    OperationType.cutoff_power,
+    operatorUserId,
+    auto,
+    actorContext,
+  );
+
+  const roomDisplayName =
+    room.devices[0]?.name?.trim() || room.name?.trim() || room.roomNumber;
+  const realtimeBeforeAction = await computeRoomRealtime(room);
+
+  const controllableDevices = room.devices;
+  if (controllableDevices.length === 0) {
+    await writeOperation(
+      operatorUserId ?? null,
+      OperationType.cutoff_power,
+      roomId,
+      {
+        action: auto ? 'auto_cutoff' : 'manual_cutoff',
+        actionLabel: auto ? '自动断电失败' : '手动断电失败',
+        source: auto ? 'system_auto' : actorContext?.source,
+        sourceLabel: auto ? '系统自动' : actorContext?.sourceLabel,
+        roomNumber: room.roomNumber,
+        roomName: room.name,
+        displayName: roomDisplayName,
+        error: '没有可控制的设备',
+      },
+      false,
+    );
+    throw new AppError(400, 'NO_CONTROLLABLE_DEVICES', '没有可控制的设备，无法执行断电');
+  }
+
+  const failedDevices: string[] = [];
+  for (const device of controllableDevices) {
     try {
-      await xiaomiAdapter.turnOff(device.did, operatorUserId);
-    } catch (e) {
-      controlSuccess = false;
+      await xiaomiAdapter.turnOff(device.did, operatorUserId, {
+        ...(actorContext ?? {}),
+        source: auto ? 'system_auto' : actorContext?.source,
+        sourceLabel: auto ? '系统自动' : actorContext?.sourceLabel,
+      });
+    } catch {
+      failedDevices.push(device.did);
     }
+  }
+
+  if (failedDevices.length > 0) {
+    await writeOperation(
+      operatorUserId ?? null,
+      OperationType.cutoff_power,
+      roomId,
+      {
+        action: auto ? 'auto_cutoff' : 'manual_cutoff',
+        actionLabel: auto ? '自动断电失败' : '手动断电失败',
+        source: auto ? 'system_auto' : actorContext?.source,
+        sourceLabel: auto ? '系统自动' : actorContext?.sourceLabel,
+        roomNumber: room.roomNumber,
+        roomName: room.name,
+        displayName: roomDisplayName,
+        failedDevices,
+        error: '部分设备断电失败',
+      },
+      false,
+    );
+    throw new AppError(
+      502,
+      'ROOM_CUTOFF_FAILED',
+      `以下设备断电失败：${failedDevices.join(', ')}`,
+    );
   }
 
   const updatedRoom = await prisma.room.update({
@@ -481,24 +679,55 @@ export async function cutoffPower(roomId: string, operatorUserId: string | null 
     operatorUserId ?? null,
     OperationType.cutoff_power,
     roomId,
-    auto ? '自动断电' : '手动断电',
-    controlSuccess,
+    {
+      action: auto ? 'auto_cutoff' : 'manual_cutoff',
+      actionLabel: auto ? '自动断电' : '手动断电',
+      source: auto ? 'system_auto' : actorContext?.source,
+      sourceLabel: auto ? '系统自动' : actorContext?.sourceLabel,
+      roomNumber: room.roomNumber,
+      roomName: room.name,
+      displayName: roomDisplayName,
+      note: '执行成功',
+    },
+    true,
   );
 
-  await prisma.alarmLog.create({
-    data: {
-      type: AlarmType.limit_reached,
-      level: AlarmLevel.critical,
+  await prisma.alarmLog.updateMany({
+    where: {
       roomId,
-      message: `${(room.devices[0]?.name || room.roomNumber)}已断电${auto ? '(自动)' : '(手动)'}`,
       resolved: false,
+      type: { in: [AlarmType.limit_80, AlarmType.limit_90, AlarmType.limit_95] },
+    },
+    data: {
+      resolved: true,
+      resolvedAt: new Date(),
     },
   });
+
+  if (!room.cutoff && realtimeBeforeAction.limitEnabled && realtimeBeforeAction.usagePercent >= 100) {
+    await prisma.alarmLog.create({
+      data: {
+        type: AlarmType.limit_reached,
+        level: AlarmLevel.critical,
+        roomId,
+        message: auto
+          ? `${roomDisplayName}已超出日限额，系统已自动断电`
+          : `${roomDisplayName}已超出日限额，已执行手动断电`,
+        resolved: true,
+        resolvedAt: new Date(),
+      },
+    });
+  }
 
   return updatedRoom;
 }
 
-export async function restorePower(roomId: string, operatorUserId: string | null, auto: boolean = false) {
+export async function restorePower(
+  roomId: string,
+  operatorUserId: string | null,
+  auto: boolean = false,
+  actorContext?: OperationActorContext,
+) {
   const room = await prisma.room.findUnique({
     where: { id: roomId },
     include: { devices: true, energyLimit: true },
@@ -507,14 +736,74 @@ export async function restorePower(roomId: string, operatorUserId: string | null
     throw new AppError(404, 'ROOM_NOT_FOUND', '房间不存在');
   }
 
-  let controlSuccess = true;
-  const onlineDevices = room.devices.filter(d => d.status === 'online');
-  for (const device of onlineDevices) {
+  await assertRoomPowerActionAllowed(
+    roomId,
+    OperationType.restore_power,
+    operatorUserId,
+    auto,
+    actorContext,
+  );
+
+  const roomDisplayName =
+    room.devices[0]?.name?.trim() || room.name?.trim() || room.roomNumber;
+
+  const controllableDevices = room.devices;
+  if (controllableDevices.length === 0) {
+    await writeOperation(
+      operatorUserId,
+      OperationType.restore_power,
+      roomId,
+      {
+        action: auto ? 'auto_restore' : 'manual_restore',
+        actionLabel: auto ? '自动恢复供电失败' : '手动恢复供电失败',
+        source: auto ? 'system_auto' : actorContext?.source,
+        sourceLabel: auto ? '系统自动' : actorContext?.sourceLabel,
+        roomNumber: room.roomNumber,
+        roomName: room.name,
+        displayName: roomDisplayName,
+        error: '没有可控制的设备',
+      },
+      false,
+    );
+    throw new AppError(400, 'NO_CONTROLLABLE_DEVICES', '没有可控制的设备，无法恢复供电');
+  }
+
+  const failedDevices: string[] = [];
+  for (const device of controllableDevices) {
     try {
-      await xiaomiAdapter.turnOn(device.did, operatorUserId ?? undefined);
-    } catch (e) {
-      controlSuccess = false;
+      await xiaomiAdapter.turnOn(device.did, operatorUserId ?? undefined, {
+        ...(actorContext ?? {}),
+        source: auto ? 'system_auto' : actorContext?.source,
+        sourceLabel: auto ? '系统自动' : actorContext?.sourceLabel,
+      });
+    } catch {
+      failedDevices.push(device.did);
     }
+  }
+
+  if (failedDevices.length > 0) {
+    await writeOperation(
+      operatorUserId,
+      OperationType.restore_power,
+      roomId,
+      {
+        action: auto ? 'auto_restore' : 'manual_restore',
+        actionLabel: auto ? '自动恢复供电失败' : '手动恢复供电失败',
+        source: auto ? 'system_auto' : actorContext?.source,
+        sourceLabel: auto ? '系统自动' : actorContext?.sourceLabel,
+        roomNumber: room.roomNumber,
+        roomName: room.name,
+        displayName: roomDisplayName,
+        failedDevices,
+        error: '部分设备恢复供电失败',
+      },
+      false,
+    );
+    throw new AppError(
+      502,
+      'ROOM_RESTORE_FAILED',
+      `以下设备恢复供电失败：${failedDevices.join(', ')}`,
+    );
   }
 
   const updatedRoom = await prisma.room.update({
@@ -533,8 +822,17 @@ export async function restorePower(roomId: string, operatorUserId: string | null
     operatorUserId,
     OperationType.restore_power,
     roomId,
-    auto ? '自动恢复供电' : '手动恢复供电',
-    controlSuccess,
+    {
+      action: auto ? 'auto_restore' : 'manual_restore',
+      actionLabel: auto ? '自动恢复供电' : '手动恢复供电',
+      source: auto ? 'system_auto' : actorContext?.source,
+      sourceLabel: auto ? '系统自动' : actorContext?.sourceLabel,
+      roomNumber: room.roomNumber,
+      roomName: room.name,
+      displayName: roomDisplayName,
+      note: '执行成功',
+    },
+    true,
   );
 
   const businessTimeZone = await systemService.getSetting(

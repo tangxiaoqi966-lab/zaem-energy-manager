@@ -109,7 +109,8 @@ const DEFAULT_FILTERS: Filters = {
 }
 
 interface PaginatedResponse {
-  list: OperationLogResponse[]
+  items: OperationLogResponse[]
+  list?: OperationLogResponse[]
   total: number
   page: number
   pageSize: number
@@ -154,7 +155,7 @@ export function OperationLogsPage() {
     setPage(page + 1)
   }
 
-  const list: OperationLogResponse[] = data?.list ?? []
+  const list: OperationLogResponse[] = data?.items ?? data?.list ?? []
   const total: number = data?.total ?? 0
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
 
@@ -170,8 +171,9 @@ export function OperationLogsPage() {
 
       <Card className="mb-6">
         <CardContent className="pt-6">
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 items-end">
-            <div className="space-y-2">
+          <div className="overflow-x-auto">
+            <div className="flex min-w-max items-end gap-4">
+              <div className="w-40 space-y-2">
               <Label htmlFor="filter-type">操作类型</Label>
               <Select
                 value={filters.type}
@@ -190,9 +192,9 @@ export function OperationLogsPage() {
                   ))}
                 </SelectContent>
               </Select>
-            </div>
+              </div>
 
-            <div className="space-y-2">
+              <div className="w-48 space-y-2">
               <Label htmlFor="filter-keyword">关键字 (详情)</Label>
               <Input
                 id="filter-keyword"
@@ -203,9 +205,9 @@ export function OperationLogsPage() {
                   setFilters((prev) => ({ ...prev, keyword: e.target.value }))
                 }
               />
-            </div>
+              </div>
 
-            <div className="space-y-2">
+              <div className="w-32 space-y-2">
               <Label htmlFor="filter-room">房间号</Label>
               <Select
                 value={filters.roomNumber}
@@ -225,9 +227,9 @@ export function OperationLogsPage() {
                   ))}
                 </SelectContent>
               </Select>
-            </div>
+              </div>
 
-            <div className="space-y-2">
+              <div className="w-40 space-y-2">
               <Label htmlFor="filter-start">开始日期</Label>
               <Input
                 id="filter-start"
@@ -237,9 +239,9 @@ export function OperationLogsPage() {
                   setFilters((prev) => ({ ...prev, startDate: e.target.value }))
                 }
               />
-            </div>
+              </div>
 
-            <div className="space-y-2">
+              <div className="w-40 space-y-2">
               <Label htmlFor="filter-end">结束日期</Label>
               <Input
                 id="filter-end"
@@ -249,21 +251,20 @@ export function OperationLogsPage() {
                   setFilters((prev) => ({ ...prev, endDate: e.target.value }))
                 }
               />
-            </div>
-          </div>
+              </div>
 
-          <div className="flex gap-3 mt-6 justify-end">
-            <Button variant="outline" onClick={handleReset}>
-              重置
-            </Button>
-            <Button onClick={handleSearch} disabled={isFetching}>
-              {isFetching ? (
-                <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Search className="mr-2 h-4 w-4" />
-              )}
-              查询
-            </Button>
+              <Button variant="outline" onClick={handleReset} className="shrink-0">
+                重置
+              </Button>
+              <Button onClick={handleSearch} disabled={isFetching} className="shrink-0">
+                {isFetching ? (
+                  <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                ) : (
+                  <Search className="mr-2 h-4 w-4" />
+                )}
+                查询
+              </Button>
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -303,10 +304,10 @@ export function OperationLogsPage() {
                           {getOperationTypeLabel(item.type)}
                         </Badge>
                       </TableCell>
-                      <TableCell>{item.username ?? '-'}</TableCell>
+                      <TableCell>{item.actorLabel ?? item.username ?? '-'}</TableCell>
                       <TableCell>{item.displayName ?? item.roomNumber ?? '-'}</TableCell>
-                      <TableCell className="max-w-md text-sm text-muted-foreground">
-                        {item.details}
+                      <TableCell className="max-w-md whitespace-pre-line text-sm text-muted-foreground">
+                        {item.detailsText ?? item.details}
                       </TableCell>
                       <TableCell>
                         <Badge variant={item.success ? 'secondary' : 'destructive'}>

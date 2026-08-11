@@ -11,7 +11,7 @@ let dashboardInterval: NodeJS.Timeout | null = null;
 export function initSocketIO(httpServer: HTTPServer): Server {
   io = new Server(httpServer, {
     cors: {
-      origin: env.CORS_ORIGIN,
+      origin: true,
       credentials: true,
     },
   });

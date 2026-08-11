@@ -57,7 +57,12 @@ api.interceptors.response.use(
         }, 800);
       }
     }
-    return Promise.reject(error);
+    const serverMessage =
+      error?.response?.data?.message ||
+      error?.response?.data?.error ||
+      error?.message ||
+      '请求失败';
+    return Promise.reject(new Error(serverMessage));
   }
 );
 
@@ -170,6 +175,8 @@ export const logs = {
     api.get('/logs/operations', { params }).then((res) => res.data),
   alarms: (params?: any): Promise<any> =>
     api.get('/logs/alarms', { params }).then((res) => res.data),
+  clearAlarms: (data?: any): Promise<any> =>
+    api.delete('/logs/alarms', { data }).then((res) => res.data),
   resolveAlarm: (id: string): Promise<any> =>
     api.post(`/logs/alarms/${id}/resolve`).then((res) => res.data),
 };

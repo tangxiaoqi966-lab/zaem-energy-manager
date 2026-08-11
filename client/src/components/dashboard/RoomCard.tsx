@@ -24,6 +24,7 @@ import { useAuthStore } from '../../store/auth';
 import type { DashboardSpaceCard } from './RoomsGrid';
 import { ValueWithUnit } from '../ui/value-with-unit';
 import { FeeHint } from '../ui/fee-hint';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip';
 
 interface RoomCardProps {
   room: DashboardSpaceCard;
@@ -430,9 +431,24 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant={room.deviceOnline ? 'success' : 'destructive'} className="text-[10px]">
-            {room.deviceOnline ? '设备在线' : '设备离线'}
-          </Badge>
+          {room.deviceOnline ? (
+            <Badge variant="success" className="text-[10px]">
+              设备在线
+            </Badge>
+          ) : (
+            <TooltipProvider delayDuration={150}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Badge variant="destructive" className="cursor-help text-[10px]">
+                    设备离线
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-[260px] text-xs leading-5">
+                  设备已离线，请检查上一级控开及总电源。
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
         </div>
 
         <div className="flex flex-col gap-3">

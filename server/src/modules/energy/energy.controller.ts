@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import * as energyService from './energy.service';
+import { getOperationActorContextFromRequest } from '../../lib/request-context';
 
 export const getRooms = async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -25,7 +26,13 @@ export const updateLimit = async (req: Request, res: Response, next: NextFunctio
     const { roomId } = req.params;
     const { dailyLimit, enabled } = req.body;
     const operatorUserId = req.user!.id;
-    const limit = await energyService.updateEnergyLimit(roomId, dailyLimit, operatorUserId, enabled);
+    const limit = await energyService.updateEnergyLimit(
+      roomId,
+      dailyLimit,
+      operatorUserId,
+      enabled,
+      getOperationActorContextFromRequest(req),
+    );
     res.json(limit);
   } catch (err) {
     next(err);
@@ -49,7 +56,11 @@ export const bulkToggleLimits = async (req: Request, res: Response, next: NextFu
       res.status(400).json({ code: 'INVALID_ENABLED', message: 'enabled 必须是布尔值' });
       return;
     }
-    const result = await energyService.bulkUpdateLimitEnabled(enabled, operatorUserId);
+    const result = await energyService.bulkUpdateLimitEnabled(
+      enabled,
+      operatorUserId,
+      getOperationActorContextFromRequest(req),
+    );
     res.json(result);
   } catch (err) {
     next(err);
@@ -60,7 +71,12 @@ export const cutoff = async (req: Request, res: Response, next: NextFunction) =>
   try {
     const { roomId } = req.params;
     const operatorUserId = req.user!.id;
-    const result = await energyService.cutoffPower(roomId, operatorUserId, false);
+    const result = await energyService.cutoffPower(
+      roomId,
+      operatorUserId,
+      false,
+      getOperationActorContextFromRequest(req),
+    );
     res.json(result);
   } catch (err) {
     next(err);
@@ -71,7 +87,12 @@ export const restore = async (req: Request, res: Response, next: NextFunction) =
   try {
     const { roomId } = req.params;
     const operatorUserId = req.user!.id;
-    const result = await energyService.restorePower(roomId, operatorUserId, false);
+    const result = await energyService.restorePower(
+      roomId,
+      operatorUserId,
+      false,
+      getOperationActorContextFromRequest(req),
+    );
     res.json(result);
   } catch (err) {
     next(err);

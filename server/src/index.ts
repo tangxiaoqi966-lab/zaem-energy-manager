@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
-import cors from 'cors';
+import cors, { type CorsOptions } from 'cors';
 import http from 'http';
 import rateLimit from 'express-rate-limit';
 import env from './config/env';
@@ -16,11 +16,17 @@ import logsRoutes from './modules/logs/logs.routes';
 
 const app = express();
 
-app.use(express.json());
-app.use(cors({
-  origin: env.CORS_ORIGIN,
+const corsOptions: CorsOptions = {
+  origin: true,
   credentials: true,
-}));
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Authorization', 'Content-Type'],
+  optionsSuccessStatus: 204,
+};
+
+app.use(express.json());
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 
 const loginLimiter = rateLimit({
   windowMs: 60 * 1000,

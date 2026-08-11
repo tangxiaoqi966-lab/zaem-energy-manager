@@ -11,6 +11,14 @@ const env = {
   XIAOMI_PASSWORD: process.env.XIAOMI_PASSWORD as string | undefined,
 };
 
+export const CORS_ORIGINS =
+  env.CORS_ORIGIN === '*'
+    ? ['*']
+    : env.CORS_ORIGIN
+        .split(',')
+        .map((item) => item.trim())
+        .filter(Boolean);
+
 export default env;
 export const {
   DATABASE_URL,

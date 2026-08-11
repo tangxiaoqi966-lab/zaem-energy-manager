@@ -3,6 +3,7 @@ import { SystemSettingsData } from '@shared/index';
 import { systemService } from './system.service';
 import { xiaomiAdapter } from './xiaomi.adapter';
 import { XIAOMI_USERNAME, XIAOMI_PASSWORD } from '../../config/env';
+import { getOperationActorContextFromRequest } from '../../lib/request-context';
 
 export const getSettings = async (
   req: Request,
@@ -25,7 +26,11 @@ export const updateSettings = async (
   try {
     const partial = req.body as Partial<SystemSettingsData>;
     const operatorUserId = req.user!.id;
-    const updated = await systemService.updateSettings(partial, operatorUserId);
+    const updated = await systemService.updateSettings(
+      partial,
+      operatorUserId,
+      getOperationActorContextFromRequest(req),
+    );
     res.json(updated);
   } catch (error) {
     next(error);
@@ -431,7 +436,10 @@ export const xiaomiSync = async (
   try {
     const operatorUserId = req.user!.id;
     try {
-      const success = await systemService.syncXiaomiDevices(operatorUserId);
+      const success = await systemService.syncXiaomiDevices(
+        operatorUserId,
+        getOperationActorContextFromRequest(req),
+      );
       res.json({ synced: success });
     } catch (error: any) {
       res.status(400).json({
@@ -462,9 +470,9 @@ export const controlDevice = async (
       return;
     }
     if (action === 'on') {
-      await xiaomiAdapter.turnOn(did, operatorUserId);
+      await xiaomiAdapter.turnOn(did, operatorUserId, getOperationActorContextFromRequest(req));
     } else {
-      await xiaomiAdapter.turnOff(did, operatorUserId);
+      await xiaomiAdapter.turnOff(did, operatorUserId, getOperationActorContextFromRequest(req));
     }
     res.json({ ok: true, did, action });
   } catch (error) {
@@ -492,7 +500,12 @@ export const renameDevice = async (
       return;
     }
 
-    const updated = await systemService.renameDevice(did, name, operatorUserId);
+    const updated = await systemService.renameDevice(
+      did,
+      name,
+      operatorUserId,
+      getOperationActorContextFromRequest(req),
+    );
     res.json(updated);
   } catch (error) {
     next(error);
@@ -513,7 +526,11 @@ export const bulkControlDevices = async (
       return;
     }
 
-    const result = await systemService.bulkControlDevices(action, operatorUserId);
+    const result = await systemService.bulkControlDevices(
+      action,
+      operatorUserId,
+      getOperationActorContextFromRequest(req),
+    );
     res.json(result);
   } catch (error) {
     next(error);
