@@ -28,15 +28,6 @@ const menuItems = [
   { to: '/logs/alarms', icon: Bell, label: '报警中心' },
 ];
 
-const pageTitles: Record<string, string> = {
-  '/': '仪表盘',
-  '/charts': '图表',
-  '/energy-limits': '限电设置',
-  '/system': '系统设置',
-  '/logs/operations': '操作日志',
-  '/logs/alarms': '报警中心',
-};
-
 export function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -51,13 +42,6 @@ export function AppLayout() {
     staleTime: 3000,
   });
   const unresolvedAlarmCount = Number(alarmSummary?.total ?? 0);
-
-  const getPageTitle = () => {
-    if (location.pathname.startsWith('/rooms/')) {
-      return '房间详情';
-    }
-    return pageTitles[location.pathname] || '仪表盘';
-  };
 
   const handleLogout = () => {
     logout();
@@ -74,7 +58,7 @@ export function AppLayout() {
       ? '超级管理员'
       : user?.role === UserRole.BOSS
         ? '管理员'
-        : '只读用户';
+        : '用户';
 
   return (
     <div className="flex h-screen bg-background">
@@ -162,17 +146,17 @@ export function AppLayout() {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <header className="flex h-14 items-center justify-between border-b px-3 sm:h-16 sm:px-4 md:px-6">
-          <div className="flex items-center gap-3">
+        <header className="flex h-12 items-center border-b px-3 md:hidden">
+          <div className="flex items-center">
             <Button
               variant="ghost"
               size="icon"
               onClick={toggleSidebar}
-              className="md:hidden"
+              className="-ml-1"
+              title="打开菜单"
             >
               <Menu className="h-5 w-5" />
             </Button>
-            <h1 className="truncate text-base font-semibold sm:text-lg">{getPageTitle()}</h1>
           </div>
         </header>
 

@@ -138,7 +138,7 @@ export function DevicesTable({ devices, invalidateOnChange, compact = false }: D
                           value={draftName}
                           onChange={(e) => setDraftName(e.target.value)}
                           className="h-8"
-                          placeholder="输入空间名称"
+                          placeholder="输入设备名称"
                           disabled={savingName}
                         />
                         <div className="flex gap-2">
@@ -170,7 +170,7 @@ export function DevicesTable({ devices, invalidateOnChange, compact = false }: D
                             variant="ghost"
                             className="h-7 w-7 shrink-0"
                             onClick={() => startRename(d)}
-                            title="修改空间名称"
+                            title="修改设备名称"
                           >
                             <Pencil className="h-3.5 w-3.5" />
                           </Button>
@@ -248,7 +248,7 @@ export function DevicesTable({ devices, invalidateOnChange, compact = false }: D
                             value={draftName}
                             onChange={(e) => setDraftName(e.target.value)}
                             className="h-8 max-w-[220px]"
-                            placeholder="输入空间名称"
+                          placeholder="输入设备名称"
                             disabled={savingName}
                           />
                           <Button
@@ -279,7 +279,7 @@ export function DevicesTable({ devices, invalidateOnChange, compact = false }: D
                               variant="ghost"
                               className="h-7 w-7"
                               onClick={() => startRename(d)}
-                              title="修改空间名称"
+                              title="修改设备名称"
                             >
                               <Pencil className="h-3.5 w-3.5" />
                             </Button>

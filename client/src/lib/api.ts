@@ -2,7 +2,11 @@ import axios from 'axios';
 import type {
   LoginRequest,
   LoginResponse,
+  ForcePasswordChangeRequest,
   UserPayload,
+  UserCreateRequest,
+  UserManagementItem,
+  UserUpdateRequest,
   DashboardSummary,
   RealtimeEnergyData,
   RoomEnergyDetail,
@@ -11,8 +15,9 @@ import type {
   DeviceItem,
 } from '../types';
 import { useAuthStore } from '../store/auth';
+import { getApiBaseUrl } from './runtime-config';
 
-const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || '/api';
+const apiBaseUrl = getApiBaseUrl();
 
 const api = axios.create({
   baseURL: apiBaseUrl,
@@ -69,11 +74,21 @@ api.interceptors.response.use(
 export const auth = {
   login: (data: LoginRequest): Promise<LoginResponse> =>
     api.post('/auth/login', data).then((res) => res.data),
+  forceChangePassword: (data: ForcePasswordChangeRequest): Promise<LoginResponse> =>
+    api.post('/auth/force-change-password', data).then((res) => res.data),
   logout: (): void => {
     useAuthStore.getState().logout();
   },
   me: (): Promise<UserPayload> =>
     api.get('/auth/me').then((res) => res.data),
+  listUsers: (): Promise<UserManagementItem[]> =>
+    api.get('/auth/users').then((res) => res.data),
+  createUser: (data: UserCreateRequest): Promise<UserManagementItem> =>
+    api.post('/auth/users', data).then((res) => res.data),
+  updateUser: (userId: string, data: UserUpdateRequest): Promise<UserManagementItem> =>
+    api.put(`/auth/users/${userId}`, data).then((res) => res.data),
+  deleteUser: (userId: string): Promise<{ ok: boolean }> =>
+    api.delete(`/auth/users/${userId}`).then((res) => res.data),
 };
 
 export const dashboard = {
@@ -166,6 +181,11 @@ export const system = {
     api.post('/system/devices/control-all', { action }).then((res) => res.data),
   controlDevice: (did: string, action: 'on' | 'off'): Promise<{ ok: boolean; did: string; action: 'on' | 'off' }> =>
     api.post(`/system/device/${did}/control`, { action }).then((res) => res.data),
+  updateRoomAnnotation: (
+    roomId: string,
+    annotation: string,
+  ): Promise<{ roomId: string; roomNumber: string; annotation: string | null; displayName: string }> =>
+    api.put(`/system/room/${roomId}/annotation`, { annotation }).then((res) => res.data),
   renameDevice: (did: string, name: string): Promise<{ did: string; name: string }> =>
     api.put(`/system/device/${did}/name`, { name }).then((res) => res.data),
 };

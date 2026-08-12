@@ -1,4 +1,5 @@
 import { Request } from 'express';
+import geoip from 'geoip-lite';
 import { OperationActorContext, OperationSource, getOperationSourceLabel } from './operation-log';
 
 function normalizeIp(ip: string | null | undefined): string | null {
@@ -34,6 +35,57 @@ function detectOperationSource(userAgent: string | null | undefined): OperationS
     return 'mobile_app';
   }
   return 'api_client';
+}
+
+function isPrivateIp(ip: string | null | undefined): boolean {
+  if (!ip) {
+    return false;
+  }
+
+  return (
+    ip === '127.0.0.1' ||
+    ip === '::1' ||
+    ip.startsWith('10.') ||
+    ip.startsWith('192.168.') ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)
+  );
+}
+
+function getGeoLabel(value: string | null | undefined): string | null {
+  const normalized = String(value || '').trim();
+  return normalized || null;
+}
+
+function buildLocationLabel(ip: string | null | undefined): string | null {
+  if (!ip) {
+    return null;
+  }
+
+  if (isPrivateIp(ip)) {
+    return `本地 / 局域网 (${ip})`;
+  }
+
+  const geo = geoip.lookup(ip);
+  if (!geo) {
+    return ip;
+  }
+
+  const country = getGeoLabel(geo.country);
+  const city = getGeoLabel(geo.city);
+
+  if (country && city) {
+    return `${country} / ${city} (${ip})`;
+  }
+
+  if (country) {
+    return `${country} (${ip})`;
+  }
+
+  if (city) {
+    return `${city} (${ip})`;
+  }
+
+  return ip;
 }
 
 function buildDeviceLabel(userAgent: string | null | undefined): string | null {
@@ -87,6 +139,7 @@ export function getOperationActorContextFromRequest(req: Request): OperationActo
     source,
     sourceLabel: getOperationSourceLabel(source) || undefined,
     ip,
+    locationLabel: buildLocationLabel(ip),
     userAgent,
     deviceLabel: buildDeviceLabel(userAgent),
   };

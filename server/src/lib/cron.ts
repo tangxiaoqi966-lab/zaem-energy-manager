@@ -1,12 +1,15 @@
 import cron from 'node-cron';
+import { OperationType } from '@prisma/client';
 import prisma from './prisma';
 import { xiaomiAdapter } from '../modules/system/xiaomi.adapter';
 import { systemService } from '../modules/system/system.service';
+import { writeOperation } from './logger';
 import {
   restorePower,
   cutoffPower,
   checkAndTriggerAlarms,
   computeRoomRealtime,
+  isRoomOverDailyLimit,
 } from '../modules/energy/energy.service';
 import { broadcastDashboard } from './socket';
 import {
@@ -17,31 +20,116 @@ import {
   getBusinessMinute,
   getDayKey,
 } from './business-time';
+import { formatRoomDisplayName } from './room-display';
 
 let lastDailyResetDayKey = '';
 
 async function dailyResetTask(): Promise<boolean> {
   const autoRestorePower = await systemService.getSetting('autoRestorePower', true);
   if (!autoRestorePower) {
+    await writeOperation(
+      null,
+      OperationType.restore_power,
+      null,
+      {
+        action: 'auto_restore_task_skipped',
+        actionLabel: '自动恢复任务跳过',
+        source: 'system_auto',
+        sourceLabel: '系统自动',
+        note: '系统设置已关闭自动恢复供电',
+      },
+      true,
+    );
     return true;
   }
 
   const cutoffRooms = await prisma.room.findMany({
     where: { cutoff: true },
+    include: {
+      energyLimit: {
+        select: { enabled: true },
+      },
+    },
   });
 
+  if (cutoffRooms.length === 0) {
+    await writeOperation(
+      null,
+      OperationType.restore_power,
+      null,
+      {
+        action: 'auto_restore_task_skipped',
+        actionLabel: '自动恢复任务跳过',
+        source: 'system_auto',
+        sourceLabel: '系统自动',
+        note: '当前没有处于断电状态的房间',
+      },
+      true,
+    );
+    return true;
+  }
+
+  await writeOperation(
+    null,
+    OperationType.restore_power,
+    null,
+    {
+      action: 'auto_restore_task_started',
+      actionLabel: '自动恢复任务开始',
+      source: 'system_auto',
+      sourceLabel: '系统自动',
+      totalCount: cutoffRooms.length,
+      note: '开始处理处于断电状态的房间恢复任务',
+    },
+    true,
+  );
+
   let allSucceeded = true;
+  let successCount = 0;
+  const failedRooms: string[] = [];
+  const skippedRooms: string[] = [];
   for (const room of cutoffRooms) {
+    if (!room.energyLimit?.enabled) {
+      skippedRooms.push(formatRoomDisplayName(room.roomNumber, room.name));
+      continue;
+    }
+
     try {
       await restorePower(room.id, 'SYSTEM_AUTO', true);
+      successCount += 1;
     } catch (error: any) {
       allSucceeded = false;
+      failedRooms.push(formatRoomDisplayName(room.roomNumber, room.name));
       console.error(
         `[dailyResetTask] 自动恢复供电失败 roomId=${room.id}:`,
         error?.message || error,
       );
     }
   }
+
+  await writeOperation(
+    null,
+    OperationType.restore_power,
+    null,
+    {
+      action: allSucceeded ? 'auto_restore_task_completed' : 'auto_restore_task_failed',
+      actionLabel: allSucceeded ? '自动恢复任务完成' : '自动恢复任务失败',
+      source: 'system_auto',
+      sourceLabel: '系统自动',
+      totalCount: cutoffRooms.length,
+      successCount,
+      failedCount: failedRooms.length,
+      skippedCount: skippedRooms.length,
+      failedRooms,
+      skippedRooms,
+      note: allSucceeded
+        ? skippedRooms.length > 0
+          ? '本轮自动恢复任务执行完成，部分房间因限额断电开关关闭而跳过'
+          : '本轮自动恢复任务执行完成'
+        : '本轮自动恢复任务存在失败房间，已停止继续频繁重试',
+    },
+    allSucceeded,
+  );
 
   return allSucceeded;
 }
@@ -173,24 +261,18 @@ async function syncDataTask(): Promise<void> {
         await checkAndTriggerAlarms(room.id);
 
         if (room.cutoff) {
-          const poweredDevices = room.devices.filter(
-            (device) =>
-              device.status === 'online' &&
-              (device.power === true || Number(device.powerW ?? 0) > 0),
-          );
-
-          if (poweredDevices.length > 0) {
-            try {
-              await cutoffPower(room.id, undefined as any, true);
-            } catch {
-            }
-          }
+          // Do not keep issuing repeated auto-cutoff commands for rooms that are already
+          // marked as cutoff. Re-sending off commands every few minutes can hammer the
+          // upstream breaker and makes it much harder to reason about midnight recovery.
           continue;
         }
 
         if (autoCutoff) {
           const realtime = await computeRoomRealtime(room);
-          if (realtime.limitEnabled && realtime.usagePercent >= 100) {
+          if (
+            realtime.limitEnabled &&
+            isRoomOverDailyLimit(realtime.todayUsage, realtime.dailyLimit)
+          ) {
             try {
               await cutoffPower(room.id, undefined as any, true);
             } catch {
@@ -231,8 +313,10 @@ export async function startCronJobs(): Promise<void> {
             console.error('[cron] 执行自动恢复供电失败：', error?.message || error);
             return false;
           });
-          if (resetOk) {
-            lastDailyResetDayKey = dayKey;
+          // Even if restore fails, do not keep retrying every minute in the same hour.
+          lastDailyResetDayKey = dayKey;
+          if (!resetOk) {
+            console.error('[cron] 自动恢复任务存在失败，本日不再重复高频重试。');
           }
         }
 

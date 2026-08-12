@@ -77,10 +77,21 @@ export function RoomDetailPage() {
     }
   }, [error]);
 
+  const roomNumber = data?.realtime.roomNumber ?? '';
+  const roomAnnotation = data?.realtime.roomAnnotation ?? '';
   const displayName = useMemo(() => {
     if (!data) return '';
-    return data.realtime.displayName || data.devices?.[0]?.name?.trim() || data.realtime.roomNumber;
+    return data.realtime.displayName || data.realtime.roomNumber;
   }, [data]);
+  const cooldownActive = (data?.realtime.powerActionRetryAfterSeconds ?? 0) > 0;
+  const cooldownLabel =
+    data?.realtime.powerActionLastType === 'cutoff_power'
+      ? `断电后冷却中，还需 ${data.realtime.powerActionRetryAfterSeconds} 秒`
+      : data?.realtime.powerActionLastType === 'restore_power'
+        ? `恢复后冷却中，还需 ${data.realtime.powerActionRetryAfterSeconds} 秒`
+        : data?.realtime.powerActionRetryAfterSeconds
+          ? `冷却中，还需 ${data.realtime.powerActionRetryAfterSeconds} 秒`
+          : '';
 
   const onCutoff = async () => {
     if (!roomId) return;
@@ -94,7 +105,7 @@ export function RoomDetailPage() {
       ]);
       setCutoffOpen(false);
     } catch (e) {
-      toast.error('断电操作失败');
+      toast.error(e instanceof Error ? e.message : '断电操作失败');
     } finally {
       setActionLoading(false);
     }
@@ -111,7 +122,7 @@ export function RoomDetailPage() {
         queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
       ]);
     } catch (e) {
-      toast.error('恢复供电操作失败');
+      toast.error(e instanceof Error ? e.message : '恢复供电操作失败');
     } finally {
       setActionLoading(false);
     }
@@ -134,39 +145,36 @@ export function RoomDetailPage() {
   };
 
   const handleStartRename = () => {
-    setDraftName(displayName);
+    setDraftName(roomAnnotation);
     setEditingName(true);
   };
 
   const handleCancelRename = () => {
-    setDraftName(displayName);
+    setDraftName(roomAnnotation);
     setEditingName(false);
   };
 
   const handleSaveRename = async () => {
-    const primaryDevice = data?.devices?.[0];
-    const nextName = draftName.trim();
-
-    if (!primaryDevice?.did || !nextName) {
-      toast.error('名称不能为空');
+    if (!roomId) {
+      toast.error('房间信息不存在');
       return;
     }
 
     try {
       setSavingName(true);
-      await api.system.renameDevice(primaryDevice.did, nextName);
+      await api.system.updateRoomAnnotation(roomId, draftName);
       await invalidateRoom();
       setEditingName(false);
-      toast.success('名称已更新');
+      toast.success('房间备注已更新');
     } catch {
-      toast.error('修改名称失败');
+      toast.error('修改房间备注失败');
     } finally {
       setSavingName(false);
     }
   };
 
   const handleTogglePower = async () => {
-    if (!data || !canControl || actionLoading) return;
+    if (!data || !canControl || actionLoading || cooldownActive) return;
     if (data.realtime.cutoff) {
       await onRestore();
       return;
@@ -221,11 +229,12 @@ export function RoomDetailPage() {
             {editingName ? (
               <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <span className="text-base font-semibold sm:text-lg">房间</span>
+                <span className="text-base font-semibold sm:text-lg">{roomNumber}</span>
                 <Input
                   value={draftName}
                   onChange={(event) => setDraftName(event.target.value)}
                   className="h-8 w-[180px] sm:w-[220px]"
-                  placeholder="输入名称"
+                  placeholder="输入备注，如租客名"
                   disabled={savingName}
                 />
                 <Button
@@ -250,21 +259,29 @@ export function RoomDetailPage() {
               <div className="flex min-w-0 flex-1 items-center gap-2">
                 <span className="text-base font-semibold sm:text-lg">房间</span>
                 <span className="min-w-0 flex-1 truncate text-base font-semibold sm:text-lg">
-                  {displayName}
+                  {roomNumber}
                 </span>
-                {canRename && data.devices?.[0]?.did && (
+                {roomAnnotation ? (
+                  <span className="truncate text-sm text-muted-foreground">
+                    ({roomAnnotation})
+                  </span>
+                ) : null}
+                {canRename && roomId && (
                   <Button
                     size="icon"
                     variant="ghost"
                     className="h-8 w-8"
                     onClick={handleStartRename}
-                    title="修改名称"
+                    title="修改房间备注"
                   >
                     <Pencil className="h-4 w-4" />
                   </Button>
                 )}
               </div>
             )}
+            {cooldownActive ? (
+              <span className="text-xs text-amber-600">{cooldownLabel}</span>
+            ) : null}
             <Dialog open={cutoffOpen} onOpenChange={setCutoffOpen}>
               <DialogContent>
                 <DialogHeader>
@@ -284,9 +301,9 @@ export function RoomDetailPage() {
                   <Button
                     variant="destructive"
                     onClick={onCutoff}
-                    disabled={actionLoading}
+                    disabled={actionLoading || cooldownActive}
                   >
-                    {actionLoading ? '执行中...' : '确认断电'}
+                    {actionLoading ? '执行中...' : cooldownActive ? '冷却中' : '确认断电'}
                   </Button>
                 </DialogFooter>
               </DialogContent>
@@ -312,8 +329,8 @@ export function RoomDetailPage() {
                     : 'bg-green-500 text-white hover:bg-green-600',
                 )}
                 onClick={handleTogglePower}
-                disabled={actionLoading}
-                title={data.realtime.cutoff ? '恢复供电' : '关闭电源'}
+                disabled={actionLoading || cooldownActive}
+                title={cooldownActive ? cooldownLabel : data.realtime.cutoff ? '恢复供电' : '关闭电源'}
               >
                 <Power className="h-5 w-5" />
               </Button>

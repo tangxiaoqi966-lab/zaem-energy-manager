@@ -11,6 +11,7 @@ import {
   getOperationTargetInfo,
   OperationActorContext,
 } from '../../lib/operation-log';
+import { formatRoomDisplayName } from '../../lib/room-display';
 
 interface PaginationParams {
   page: number;
@@ -123,12 +124,12 @@ class LogsService {
         roomId: log.roomId,
         roomNumber: log.room?.roomNumber ?? targetInfo.roomNumber,
         displayName:
-          log.room?.devices[0]?.name?.trim() ||
-          log.room?.name?.trim() ||
-          log.room?.roomNumber ||
+          (log.room?.roomNumber
+            ? formatRoomDisplayName(log.room.roomNumber, log.room.name)
+            : null) ||
           targetInfo.displayName ||
-          targetInfo.deviceName ||
           targetInfo.roomName ||
+          targetInfo.deviceName ||
           targetInfo.roomNumber,
         details: log.details,
         detailsText: detailsWithResult,
@@ -207,9 +208,9 @@ class LogsService {
       roomId: log.roomId,
       roomNumber: log.room?.roomNumber ?? null,
       displayName:
-        log.room?.devices[0]?.name?.trim() ||
-        log.room?.name?.trim() ||
-        log.room?.roomNumber ||
+        (log.room?.roomNumber
+          ? formatRoomDisplayName(log.room.roomNumber, log.room.name)
+          : null) ||
         null,
       message: log.message,
       createdAt: log.createdAt.toISOString(),
@@ -313,10 +314,9 @@ class LogsService {
       alarm?.type === AlarmType.limit_90 ||
       alarm?.type === AlarmType.limit_95;
     const roomDisplayName =
-      alarm?.room?.devices[0]?.name?.trim() ||
-      alarm?.room?.name?.trim() ||
-      alarm?.room?.roomNumber ||
-      null;
+      alarm?.room?.roomNumber
+        ? formatRoomDisplayName(alarm.room.roomNumber, alarm.room.name)
+        : null;
 
     await writeOperation(
       operatorUserId,

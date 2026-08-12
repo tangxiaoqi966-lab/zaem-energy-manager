@@ -69,6 +69,8 @@ model User {
   username     String        @unique
   passwordHash String
   name         String
+  mustChangePassword Boolean @default(false)
+  passwordUpdatedAt DateTime?
   roleId       String
   role         Role          @relation(fields: [roleId], references: [id])
   lastLoginAt  DateTime?

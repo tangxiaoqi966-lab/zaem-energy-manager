@@ -9,6 +9,9 @@ const env = {
   NODE_ENV: (process.env.NODE_ENV ?? 'development') as 'development' | 'production' | 'test',
   XIAOMI_USERNAME: process.env.XIAOMI_USERNAME as string | undefined,
   XIAOMI_PASSWORD: process.env.XIAOMI_PASSWORD as string | undefined,
+  ADMIN_RESET_USERNAME: process.env.ADMIN_RESET_USERNAME as string | undefined,
+  ADMIN_RESET_PASSWORD: process.env.ADMIN_RESET_PASSWORD as string | undefined,
+  ADMIN_RESET_NAME: process.env.ADMIN_RESET_NAME as string | undefined,
 };
 
 export const CORS_ORIGINS =
@@ -29,4 +32,7 @@ export const {
   NODE_ENV,
   XIAOMI_USERNAME,
   XIAOMI_PASSWORD,
+  ADMIN_RESET_USERNAME,
+  ADMIN_RESET_PASSWORD,
+  ADMIN_RESET_NAME,
 } = env;

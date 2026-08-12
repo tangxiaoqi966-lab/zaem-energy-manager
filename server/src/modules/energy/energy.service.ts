@@ -29,8 +29,15 @@ import {
   getDateKey,
 } from '../../lib/business-time';
 import { OperationActorContext } from '../../lib/operation-log';
+import { formatRoomDisplayName, normalizeRoomAnnotation } from '../../lib/room-display';
 
 const ROOM_POWER_ACTION_WINDOW_MS = 3 * 60 * 1000;
+const AUTO_RESTORE_CONFIRMATION_OPTIONS = {
+  initialDelayMs: 15000,
+  retryDelayMs: 5000,
+  maxAttempts: 4,
+};
+const LIMIT_EXCEEDED_EPSILON_KWH = 0.001;
 
 const PRISMA_TO_SHARED_DEVICE_STATUS_ENERGY: Record<PrismaDeviceStatus, DeviceStatus> =
   {
@@ -68,10 +75,9 @@ async function assertRoomPowerActionAllowed(
   actorContext?: OperationActorContext,
 ) {
   const since = new Date(Date.now() - ROOM_POWER_ACTION_WINDOW_MS);
-  const recentActions = await prisma.operationLog.findMany({
+  const latestAction = await prisma.operationLog.findFirst({
     where: {
       roomId,
-      success: true,
       type: {
         in: [OperationType.cutoff_power, OperationType.restore_power],
       },
@@ -79,25 +85,24 @@ async function assertRoomPowerActionAllowed(
         gte: since,
       },
     },
-    orderBy: {
-      createdAt: 'desc',
-    },
+    orderBy: { createdAt: 'desc' },
     select: {
       type: true,
       createdAt: true,
     },
   });
 
-  const sameAction = recentActions.find((item) => item.type === actionType);
-  if (sameAction) {
+  if (latestAction) {
     const retryAfterSeconds = Math.max(
       1,
       Math.ceil(
-        (sameAction.createdAt.getTime() + ROOM_POWER_ACTION_WINDOW_MS - Date.now()) / 1000,
+        (latestAction.createdAt.getTime() + ROOM_POWER_ACTION_WINDOW_MS - Date.now()) / 1000,
       ),
     );
-    const actionLabel = actionType === OperationType.cutoff_power ? '断电' : '恢复供电';
-    const message = `同一房间 3 分钟内不能重复${actionLabel}，请 ${retryAfterSeconds} 秒后再试`;
+    const previousActionLabel =
+      latestAction.type === OperationType.cutoff_power ? '断电' : '恢复供电';
+    const currentActionLabel = actionType === OperationType.cutoff_power ? '断电' : '恢复供电';
+    const message = `同一房间执行${previousActionLabel}后需要冷却 3 分钟，当前不能再${currentActionLabel}，请 ${retryAfterSeconds} 秒后再试`;
 
     await writeOperation(
       operatorUserId ?? null,
@@ -109,8 +114,9 @@ async function assertRoomPowerActionAllowed(
         source: auto ? 'system_auto' : actorContext?.source,
         sourceLabel: auto ? '系统自动' : actorContext?.sourceLabel,
         blocked: true,
-        reason: 'duplicate_action_in_window',
-        retryAfterSeconds,
+          reason: 'room_power_action_cooldown_active',
+          retryAfterSeconds,
+          note: `上一次${previousActionLabel}后仍处于冷却时间内`,
       },
       false,
     );
@@ -119,38 +125,86 @@ async function assertRoomPowerActionAllowed(
       retryAfterSeconds,
     });
   }
+}
 
-  if (recentActions.length >= 2) {
-    const oldestRecentAction = recentActions[recentActions.length - 1];
-    const retryAfterSeconds = Math.max(
-      1,
-      Math.ceil(
-        (oldestRecentAction.createdAt.getTime() + ROOM_POWER_ACTION_WINDOW_MS - Date.now()) /
-          1000,
-      ),
-    );
-    const message = `同一房间 3 分钟内最多只允许 1 次断电和 1 次恢复，请 ${retryAfterSeconds} 秒后再试`;
-
-    await writeOperation(
-      operatorUserId ?? null,
-      actionType,
+async function getRoomPowerActionCooldown(roomId: string): Promise<{
+  powerActionCooldownUntil: string | null;
+  powerActionRetryAfterSeconds: number;
+  powerActionLastType: 'cutoff_power' | 'restore_power' | null;
+}> {
+  const since = new Date(Date.now() - ROOM_POWER_ACTION_WINDOW_MS);
+  const latestAction = await prisma.operationLog.findFirst({
+    where: {
       roomId,
-      {
-        action: auto ? `auto_${actionType}` : actionType,
-        actionLabel: actionType === OperationType.cutoff_power ? '断电被拦截' : '恢复供电被拦截',
-        source: auto ? 'system_auto' : actorContext?.source,
-        sourceLabel: auto ? '系统自动' : actorContext?.sourceLabel,
-        blocked: true,
-        reason: 'too_many_actions_in_window',
-        retryAfterSeconds,
+      type: {
+        in: [OperationType.cutoff_power, OperationType.restore_power],
       },
-      false,
-    );
+      createdAt: {
+        gte: since,
+      },
+    },
+    orderBy: { createdAt: 'desc' },
+    select: {
+      type: true,
+      createdAt: true,
+    },
+  });
 
-    throw new AppError(429, 'ROOM_POWER_ACTION_COOLDOWN', message, {
-      retryAfterSeconds,
-    });
+  if (!latestAction) {
+    return {
+      powerActionCooldownUntil: null,
+      powerActionRetryAfterSeconds: 0,
+      powerActionLastType: null,
+    };
   }
+
+  const expiresAt = new Date(latestAction.createdAt.getTime() + ROOM_POWER_ACTION_WINDOW_MS);
+  const retryAfterSeconds = Math.max(
+    0,
+    Math.ceil((expiresAt.getTime() - Date.now()) / 1000),
+  );
+
+  if (retryAfterSeconds <= 0) {
+    return {
+      powerActionCooldownUntil: null,
+      powerActionRetryAfterSeconds: 0,
+      powerActionLastType: null,
+    };
+  }
+
+  return {
+    powerActionCooldownUntil: expiresAt.toISOString(),
+    powerActionRetryAfterSeconds: retryAfterSeconds,
+    powerActionLastType:
+      latestAction.type === OperationType.cutoff_power
+        ? 'cutoff_power'
+        : 'restore_power',
+  };
+}
+
+export function isRoomOverDailyLimit(
+  todayUsage: number,
+  dailyLimit: number | null | undefined,
+): boolean {
+  if (dailyLimit == null || dailyLimit <= 0) {
+    return false;
+  }
+
+  return todayUsage > dailyLimit + LIMIT_EXCEEDED_EPSILON_KWH;
+}
+
+function getRoomAnnotation(room: {
+  roomNumber: string;
+  name?: string | null;
+}): string | null {
+  return normalizeRoomAnnotation(room.roomNumber, room.name);
+}
+
+function getRoomDisplayName(room: {
+  roomNumber: string;
+  name?: string | null;
+}): string {
+  return formatRoomDisplayName(room.roomNumber, room.name);
 }
 
 export async function computeRoomRealtime(room: {
@@ -177,7 +231,7 @@ export async function computeRoomRealtime(room: {
   const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
   const yearStart = new Date(today.getFullYear(), 0, 1);
 
-  const [todayRecord, yesterdayRecord, monthAgg, yearAgg] = await Promise.all([
+  const [todayRecord, yesterdayRecord, monthAgg, yearAgg, powerActionCooldown] = await Promise.all([
     prisma.dailyEnergy.findUnique({ where: { roomId_date: { roomId: room.id, date: today } } }),
     prisma.dailyEnergy.findUnique({ where: { roomId_date: { roomId: room.id, date: yesterday } } }),
     prisma.dailyEnergy.aggregate({
@@ -188,6 +242,7 @@ export async function computeRoomRealtime(room: {
       where: { roomId: room.id, date: { gte: yearStart, lt: tomorrow } },
       _sum: { usageKwh: true },
     }),
+    getRoomPowerActionCooldown(room.id),
   ]);
 
   const todayUsage = todayRecord?.usageKwh ?? 0;
@@ -206,11 +261,14 @@ export async function computeRoomRealtime(room: {
   const onlineDevices = devices.filter((d: any) => d.status === 'online');
   const deviceOnline = onlineDevices.length > 0 || devices.length === 0;
   const mainDevice = onlineDevices[0] || devices[0];
-  const displayName =
-    mainDevice?.name?.trim() ||
-    devices[0]?.name?.trim() ||
-    room.name?.trim() ||
-    room.roomNumber;
+  const displayName = getRoomDisplayName({
+    roomNumber: room.roomNumber,
+    name: room.name,
+  });
+  const roomAnnotation = getRoomAnnotation({
+    roomNumber: room.roomNumber,
+    name: room.name,
+  });
 
   const power = mainDevice?.powerW ?? 0;
   const current = mainDevice?.currentA ?? 0;
@@ -221,11 +279,11 @@ export async function computeRoomRealtime(room: {
     status = shared_types.RoomStatus.CUTOFF;
   } else if (devices.length > 0 && !deviceOnline) {
     status = shared_types.RoomStatus.OFFLINE;
-  } else if (limitEnabled && usagePercent >= 95) {
+  } else if (usagePercent >= 95) {
     status = shared_types.RoomStatus.WARNING_95;
-  } else if (limitEnabled && usagePercent >= 90) {
+  } else if (usagePercent >= 90) {
     status = shared_types.RoomStatus.WARNING_90;
-  } else if (limitEnabled && usagePercent >= 80) {
+  } else if (usagePercent >= 80) {
     status = shared_types.RoomStatus.WARNING_80;
   } else {
     status = shared_types.RoomStatus.NORMAL;
@@ -235,6 +293,7 @@ export async function computeRoomRealtime(room: {
     roomId: room.id,
     roomNumber: room.roomNumber,
     displayName,
+    roomAnnotation,
     power,
     current,
     voltage,
@@ -248,6 +307,9 @@ export async function computeRoomRealtime(room: {
     limitEnabled,
     deviceOnline,
     cutoff: room.cutoff,
+    powerActionCooldownUntil: powerActionCooldown.powerActionCooldownUntil,
+    powerActionRetryAfterSeconds: powerActionCooldown.powerActionRetryAfterSeconds,
+    powerActionLastType: powerActionCooldown.powerActionLastType,
     devices: devices.map(toDeviceItem),
   };
 }
@@ -390,7 +452,7 @@ export async function updateEnergyLimit(
       sourceLabel: actorContext?.sourceLabel,
       roomNumber: room.roomNumber,
       roomName: room.name,
-      displayName: room.name || room.roomNumber,
+      displayName: getRoomDisplayName(room),
       dailyLimit,
       limitEnabled: limit.enabled,
       note: '更新成功',
@@ -418,10 +480,8 @@ export async function getEnergyLimits() {
 
   return items.map((item) => ({
     ...item,
-    displayName:
-      item.room.devices[0]?.name?.trim() ||
-      item.room.name?.trim() ||
-      item.room.roomNumber,
+    displayName: getRoomDisplayName(item.room),
+    roomAnnotation: getRoomAnnotation(item.room),
   }));
 }
 
@@ -607,9 +667,56 @@ export async function cutoffPower(
     actorContext,
   );
 
-  const roomDisplayName =
-    room.devices[0]?.name?.trim() || room.name?.trim() || room.roomNumber;
+  const roomDisplayName = getRoomDisplayName(room);
   const realtimeBeforeAction = await computeRoomRealtime(room);
+
+  if (
+    auto &&
+    !realtimeBeforeAction.limitEnabled
+  ) {
+    await writeOperation(
+      operatorUserId ?? null,
+      OperationType.cutoff_power,
+      roomId,
+      {
+        action: 'auto_cutoff_skipped',
+        actionLabel: '自动断电跳过',
+        source: 'system_auto',
+        sourceLabel: '系统自动',
+        roomNumber: room.roomNumber,
+        roomName: room.name,
+        displayName: roomDisplayName,
+        limitEnabled: false,
+        note: '限额断电开关已关闭，不执行自动断电',
+      },
+      true,
+    );
+    return room;
+  }
+
+  if (
+    auto &&
+    !isRoomOverDailyLimit(realtimeBeforeAction.todayUsage, realtimeBeforeAction.dailyLimit)
+  ) {
+    await writeOperation(
+      operatorUserId ?? null,
+      OperationType.cutoff_power,
+      roomId,
+      {
+        action: 'auto_cutoff_skipped',
+        actionLabel: '自动断电跳过',
+        source: 'system_auto',
+        sourceLabel: '系统自动',
+        roomNumber: room.roomNumber,
+        roomName: room.name,
+        displayName: roomDisplayName,
+        dailyLimit: realtimeBeforeAction.dailyLimit,
+        note: `当前用电 ${realtimeBeforeAction.todayUsage.toFixed(3)} kWh，未超出限额，不执行自动断电`,
+      },
+      true,
+    );
+    return room;
+  }
 
   const controllableDevices = room.devices;
   if (controllableDevices.length === 0) {
@@ -704,7 +811,11 @@ export async function cutoffPower(
     },
   });
 
-  if (!room.cutoff && realtimeBeforeAction.limitEnabled && realtimeBeforeAction.usagePercent >= 100) {
+  if (
+    !room.cutoff &&
+    realtimeBeforeAction.limitEnabled &&
+    isRoomOverDailyLimit(realtimeBeforeAction.todayUsage, realtimeBeforeAction.dailyLimit)
+  ) {
     await prisma.alarmLog.create({
       data: {
         type: AlarmType.limit_reached,
@@ -744,8 +855,29 @@ export async function restorePower(
     actorContext,
   );
 
-  const roomDisplayName =
-    room.devices[0]?.name?.trim() || room.name?.trim() || room.roomNumber;
+  const roomDisplayName = getRoomDisplayName(room);
+  const realtimeBeforeAction = await computeRoomRealtime(room);
+
+  if (auto && !realtimeBeforeAction.limitEnabled) {
+    await writeOperation(
+      operatorUserId,
+      OperationType.restore_power,
+      roomId,
+      {
+        action: 'auto_restore_skipped',
+        actionLabel: '自动恢复供电跳过',
+        source: 'system_auto',
+        sourceLabel: '系统自动',
+        roomNumber: room.roomNumber,
+        roomName: room.name,
+        displayName: roomDisplayName,
+        limitEnabled: false,
+        note: '限额断电开关已关闭，不执行自动恢复供电',
+      },
+      true,
+    );
+    return room;
+  }
 
   const controllableDevices = room.devices;
   if (controllableDevices.length === 0) {
@@ -775,7 +907,7 @@ export async function restorePower(
         ...(actorContext ?? {}),
         source: auto ? 'system_auto' : actorContext?.source,
         sourceLabel: auto ? '系统自动' : actorContext?.sourceLabel,
-      });
+      }, auto ? AUTO_RESTORE_CONFIRMATION_OPTIONS : undefined);
     } catch {
       failedDevices.push(device.did);
     }
@@ -887,7 +1019,8 @@ export async function getMonthlyRanking(limit: number = 14): Promise<RankingItem
   const roomRecords: RankingItem[] = monthRecords.map((r, i) => ({
     roomId: r.roomId,
     roomNumber: r.room.roomNumber,
-    displayName: r.room.devices[0]?.name?.trim() || r.room.name?.trim() || r.room.roomNumber,
+    displayName: getRoomDisplayName(r.room),
+    roomAnnotation: getRoomAnnotation(r.room),
     usage: r.usageKwh,
     rank: i + 1,
   }));
@@ -910,7 +1043,8 @@ export async function getMonthlyRanking(limit: number = 14): Promise<RankingItem
       roomRecords.push({
         roomId: r.id,
         roomNumber: r.roomNumber,
-        displayName: r.devices[0]?.name?.trim() || r.name?.trim() || r.roomNumber,
+        displayName: getRoomDisplayName(r),
+        roomAnnotation: getRoomAnnotation(r),
         usage: 0,
         rank: nextRank++,
       });

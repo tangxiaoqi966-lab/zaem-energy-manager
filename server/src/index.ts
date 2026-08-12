@@ -8,6 +8,7 @@ import { errorHandler, notFound } from './lib/errors';
 import { initSocketIO } from './lib/socket';
 import { setupSwagger } from './lib/swagger';
 import { startCronJobs } from './lib/cron';
+import { applyAdminResetFromEnv } from './modules/auth/auth.service';
 import authRoutes from './modules/auth/auth.routes';
 import dashboardRoutes from './modules/dashboard/dashboard.routes';
 import energyRoutes from './modules/energy/energy.routes';
@@ -15,6 +16,7 @@ import systemRoutes from './modules/system/system.routes';
 import logsRoutes from './modules/logs/logs.routes';
 
 const app = express();
+app.set('trust proxy', 1);
 
 const corsOptions: CorsOptions = {
   origin: true,
@@ -54,6 +56,7 @@ initSocketIO(httpServer);
 
 httpServer.listen(env.PORT, async () => {
   try {
+    await applyAdminResetFromEnv();
     await startCronJobs();
     console.log(`listening on ${env.PORT}`);
   } catch {

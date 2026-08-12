@@ -72,6 +72,37 @@ export interface UserPayload {
   username: string;
   role: UserRole;
   name: string;
+  mustChangePassword?: boolean;
+}
+
+export interface UserManagementItem {
+  id: string;
+  username: string;
+  role: UserRole;
+  name: string;
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+export interface UserCreateRequest {
+  username: string;
+  password: string;
+  name: string;
+  role: UserRole;
+}
+
+export interface UserUpdateRequest {
+  name?: string;
+  password?: string;
+  role?: UserRole;
+}
+
+export interface ForcePasswordChangeRequest {
+  username: string;
+  currentPassword: string;
+  newUsername: string;
+  newPassword: string;
+  newName?: string;
 }
 
 export interface LoginRequest {
@@ -95,6 +126,7 @@ export interface RealtimeEnergyData {
   roomId: string;
   roomNumber: string;
   displayName: string;
+  roomAnnotation?: string | null;
   power: number;
   current: number;
   voltage: number;
@@ -108,6 +140,9 @@ export interface RealtimeEnergyData {
   limitEnabled: boolean;
   deviceOnline: boolean;
   cutoff: boolean;
+  powerActionCooldownUntil: string | null;
+  powerActionRetryAfterSeconds: number;
+  powerActionLastType: 'cutoff_power' | 'restore_power' | null;
   devices: DeviceItem[];
 }
 
@@ -157,6 +192,7 @@ export interface RankingItem {
   roomId: string;
   roomNumber: string;
   displayName: string;
+  roomAnnotation?: string | null;
   usage: number;
   rank: number;
 }

@@ -13,6 +13,7 @@ import { EnergyLimitsPage } from './pages/EnergyLimitsPage';
 import { SystemSettingsPage } from './pages/SystemSettingsPage';
 import { OperationLogsPage } from './pages/OperationLogsPage';
 import { AlarmCenterPage } from './pages/AlarmCenterPage';
+import { ForcePasswordChangePage } from './pages/ForcePasswordChangePage';
 
 function App() {
   return (
@@ -21,6 +22,14 @@ function App() {
         <Toaster />
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route
+            path="/force-change-password"
+            element={
+              <ProtectedRoute>
+                <ForcePasswordChangePage />
+              </ProtectedRoute>
+            }
+          />
           <Route
             path="/"
             element={

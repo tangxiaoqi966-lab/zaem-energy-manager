@@ -9,6 +9,7 @@ import {
   xiaomiSync,
   controlDevice,
   renameDevice,
+  updateRoomAnnotation,
   bulkControlDevices,
 } from './system.controller';
 
@@ -23,5 +24,6 @@ router.post('/xiaomi/sync', authenticate, requireRole(UserRole.admin), xiaomiSyn
 router.post('/devices/control-all', authenticate, requireRole(UserRole.admin, UserRole.boss), bulkControlDevices);
 router.post('/device/:did/control', authenticate, requireRole(UserRole.admin, UserRole.boss), controlDevice);
 router.put('/device/:did/name', authenticate, requireRole(UserRole.admin, UserRole.boss), renameDevice);
+router.put('/room/:roomId/annotation', authenticate, requireRole(UserRole.admin, UserRole.boss), updateRoomAnnotation);
 
 export default router;

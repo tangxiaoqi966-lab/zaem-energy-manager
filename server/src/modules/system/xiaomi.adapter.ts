@@ -14,6 +14,7 @@ import {
   getDayKey,
 } from '../../lib/business-time';
 import { OperationActorContext } from '../../lib/operation-log';
+import { formatRoomDisplayName } from '../../lib/room-display';
 
 interface XiaomiSession {
   userId: string;
@@ -51,6 +52,12 @@ interface DevicePropSnapshot {
   currentA?: number;
   voltageV?: number;
   totalKwh?: number;
+}
+
+interface PowerConfirmationOptions {
+  initialDelayMs?: number;
+  retryDelayMs?: number;
+  maxAttempts?: number;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -1444,8 +1451,15 @@ class XiaomiAdapter {
     session: XiaomiSession,
     deviceDid: string,
     expectedPower: boolean,
+    options?: PowerConfirmationOptions,
   ): Promise<DevicePropSnapshot> {
-    const maxAttempts = 4;
+    const maxAttempts = Math.max(1, options?.maxAttempts ?? 4);
+    const initialDelayMs = Math.max(0, options?.initialDelayMs ?? 0);
+    const retryDelayMs = Math.max(0, options?.retryDelayMs ?? 2000);
+
+    if (initialDelayMs > 0) {
+      await sleep(initialDelayMs);
+    }
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       const snapshot = await this.getSingleDeviceSnapshot(session, deviceDid);
@@ -1453,7 +1467,7 @@ class XiaomiAdapter {
         return snapshot;
       }
       if (attempt < maxAttempts - 1) {
-        await sleep(2000);
+        await sleep(retryDelayMs);
       }
     }
 
@@ -2193,10 +2207,9 @@ class XiaomiAdapter {
       roomNumber: device?.room?.roomNumber ?? null,
       roomName: device?.room?.name ?? null,
       displayName:
-        device?.name?.trim() ||
-        device?.room?.name?.trim() ||
-        device?.room?.roomNumber ||
-        null,
+        device?.room?.roomNumber
+          ? formatRoomDisplayName(device.room.roomNumber, device.room.name)
+          : device?.name?.trim() || null,
       deviceName: device?.name?.trim() || null,
     };
   }
@@ -2205,6 +2218,7 @@ class XiaomiAdapter {
     deviceDid: string,
     operatorUserId: string | null | undefined,
     actorContext?: OperationActorContext,
+    confirmationOptions?: PowerConfirmationOptions,
   ): Promise<boolean> {
     const auditTarget = await this.getDeviceAuditDetails(deviceDid);
 
@@ -2226,7 +2240,12 @@ class XiaomiAdapter {
           throw new Error(`米家返回开启失败 code=${failed.code}`);
         }
       }
-      const confirmed = await this.confirmDevicePowerState(session, deviceDid, true);
+      const confirmed = await this.confirmDevicePowerState(
+        session,
+        deviceDid,
+        true,
+        confirmationOptions,
+      );
       await prisma.device.update({
         where: { did: deviceDid },
         data: {

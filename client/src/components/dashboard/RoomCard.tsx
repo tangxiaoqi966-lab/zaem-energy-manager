@@ -77,7 +77,7 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
   const canControl = role === UserRole.ADMIN || role === UserRole.BOSS;
   const canRename = role === UserRole.ADMIN || role === UserRole.BOSS;
   const [editingName, setEditingName] = useState(false);
-  const [draftName, setDraftName] = useState(room.title);
+  const [draftName, setDraftName] = useState(room.roomAnnotation ?? '');
   const [savingName, setSavingName] = useState(false);
   const [switchPending, setSwitchPending] = useState(false);
   const [limitDialogOpen, setLimitDialogOpen] = useState(false);
@@ -95,6 +95,13 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
       : 0;
   const referenceCostBase = room.roomId ? room.todayUsage : room.monthUsage;
   const referenceCost = referenceCostBase * pricePerKwh;
+  const cooldownActive = room.powerActionRetryAfterSeconds > 0;
+  const cooldownLabel =
+    room.powerActionLastType === 'cutoff_power'
+      ? `断电后冷却中，还需 ${room.powerActionRetryAfterSeconds} 秒`
+      : room.powerActionLastType === 'restore_power'
+        ? `恢复后冷却中，还需 ${room.powerActionRetryAfterSeconds} 秒`
+        : `冷却中，还需 ${room.powerActionRetryAfterSeconds} 秒`;
 
   const getCardToneClass = () => {
     switch (room.status) {
@@ -131,33 +138,33 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
 
   const handleStartRename = (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
-    setDraftName(room.title);
+    setDraftName(room.roomAnnotation ?? '');
     setEditingName(true);
   };
 
   const handleCancelRename = (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
-    setDraftName(room.title);
+    setDraftName(room.roomAnnotation ?? '');
     setEditingName(false);
   };
 
   const handleSaveRename = async (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
 
-    const nextName = draftName.trim();
-    if (!deviceDid || !nextName) {
-      toast.error('名称不能为空');
+    if (!room.roomId) {
+      toast.error('房间信息不存在');
       return;
     }
 
     try {
       setSavingName(true);
-      await system.renameDevice(deviceDid, nextName);
+      await system.updateRoomAnnotation(room.roomId, draftName);
       await queryClient.invalidateQueries({ queryKey: ['dashboard'] });
+      await queryClient.invalidateQueries({ queryKey: ['room', room.roomId] });
       setEditingName(false);
-      toast.success('空间名称已更新');
+      toast.success('房间备注已更新');
     } catch {
-      toast.error('修改空间名称失败');
+      toast.error('修改房间备注失败');
     } finally {
       setSavingName(false);
     }
@@ -178,8 +185,8 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
         queryClient.invalidateQueries({ queryKey: ['dashboard'] }),
         queryClient.invalidateQueries({ queryKey: ['room', room.roomId] }),
       ]);
-    } catch {
-      toast.error(room.cutoff ? '恢复供电失败' : '断电操作失败');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : (room.cutoff ? '恢复供电失败' : '断电操作失败'));
     }
   };
 
@@ -283,11 +290,14 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
                 className="flex flex-wrap items-center gap-2"
                 onClick={(event) => event.stopPropagation()}
               >
+                <span className="text-[clamp(1rem,1.4vw,1.125rem)] font-bold tracking-tight">
+                  {room.title}
+                </span>
                 <Input
                   value={draftName}
                   onChange={(event) => setDraftName(event.target.value)}
                   className="h-8 max-w-[220px]"
-                  placeholder="输入空间名称"
+                  placeholder="输入备注，如租客名"
                   disabled={savingName}
                 />
                 <Button
@@ -309,17 +319,24 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
                 </Button>
               </div>
             ) : (
-              <div className="flex flex-wrap items-center gap-2">
-                <h3 className="break-words text-[clamp(1rem,1.4vw,1.125rem)] font-bold tracking-tight">
-                  {room.title}
-                </h3>
-                {canRename && deviceDid && (
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="break-words text-[clamp(1rem,1.4vw,1.125rem)] font-bold tracking-tight">
+                    {room.title}
+                  </h3>
+                  {room.roomAnnotation ? (
+                    <span className="truncate text-xs text-muted-foreground sm:text-sm">
+                      ({room.roomAnnotation})
+                    </span>
+                  ) : null}
+                </div>
+                {canRename && room.roomId && (
                   <Button
                     size="icon"
                     variant="ghost"
                     className="h-7 w-7"
                     onClick={handleStartRename}
-                    title="修改空间名称"
+                    title="修改房间备注"
                   >
                     <Pencil className="h-3.5 w-3.5" />
                   </Button>
@@ -449,6 +466,11 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
               </Tooltip>
             </TooltipProvider>
           )}
+          {cooldownActive ? (
+            <Badge variant="outline" className="text-[10px]">
+              {cooldownLabel}
+            </Badge>
+          ) : null}
         </div>
 
         <div className="flex flex-col gap-3">
@@ -494,8 +516,10 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
               variant={room.cutoff ? 'default' : 'outline'}
               className="h-9 min-w-0 flex-1 basis-[120px] text-[clamp(0.72rem,0.95vw,0.78rem)]"
               onClick={handlePowerAction}
+              disabled={cooldownActive}
+              title={cooldownActive ? cooldownLabel : undefined}
             >
-              {room.cutoff ? '恢复供电' : '立即断电'}
+              {cooldownActive ? '冷却中' : room.cutoff ? '恢复供电' : '立即断电'}
             </Button>
           )}
           </div>

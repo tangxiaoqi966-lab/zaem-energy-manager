@@ -6,6 +6,7 @@ import { xiaomiAdapter } from './xiaomi.adapter';
 import { broadcastDashboard } from '../../lib/socket';
 import { DEFAULT_BUSINESS_TIMEZONE, normalizeBusinessTimeZone } from '../../lib/business-time';
 import { OperationActorContext } from '../../lib/operation-log';
+import { formatRoomDisplayName, normalizeRoomAnnotation } from '../../lib/room-display';
 
 const DEFAULT_SETTINGS: SystemSettingsData = {
   alarmRatio80: 0.8,
@@ -162,21 +163,52 @@ class SystemService {
       throw new Error('设备名称不能为空');
     }
 
-    const updated = await prisma.device.update({
+    const existing = await prisma.device.findUnique({
       where: { did },
-      data: { name: nextName },
-      select: { did: true, name: true },
+      include: {
+        room: {
+          select: {
+            id: true,
+            roomNumber: true,
+            name: true,
+          },
+        },
+      },
+    });
+
+    if (!existing) {
+      throw new Error('设备不存在');
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      const nextDevice = await tx.device.update({
+        where: { did },
+        data: { name: nextName },
+        select: { did: true, name: true },
+      });
+
+      if (existing.room?.id) {
+        await tx.room.update({
+          where: { id: existing.room.id },
+          data: { name: nextName },
+        });
+      }
+
+      return nextDevice;
     });
 
     await writeOperation(
       operatorUserId,
       OperationType.update_settings,
-      null,
+      existing.room?.id ?? null,
       {
         action: 'rename_device',
         actionLabel: '修改空间名称',
         source: actorContext?.source,
         sourceLabel: actorContext?.sourceLabel,
+        roomNumber: existing.room?.roomNumber ?? null,
+        roomName: nextName,
+        displayName: nextName,
         did,
         deviceName: nextName,
       },
@@ -184,6 +216,63 @@ class SystemService {
     );
 
     return updated;
+  }
+
+  public async updateRoomAnnotation(
+    roomId: string,
+    annotation: string,
+    operatorUserId: string | null,
+    actorContext?: OperationActorContext,
+  ): Promise<{ roomId: string; roomNumber: string; annotation: string | null; displayName: string }> {
+    const room = await prisma.room.findUnique({
+      where: { id: roomId },
+      select: {
+        id: true,
+        roomNumber: true,
+        name: true,
+      },
+    });
+
+    if (!room) {
+      throw new Error('房间不存在');
+    }
+
+    const normalizedAnnotation = normalizeRoomAnnotation(room.roomNumber, annotation);
+    const updated = await prisma.room.update({
+      where: { id: roomId },
+      data: {
+        name: normalizedAnnotation ?? '',
+      },
+      select: {
+        id: true,
+        roomNumber: true,
+        name: true,
+      },
+    });
+
+    await writeOperation(
+      operatorUserId,
+      OperationType.update_settings,
+      roomId,
+      {
+        action: 'update_room_annotation',
+        actionLabel: normalizedAnnotation ? '修改房间备注' : '清空房间备注',
+        source: actorContext?.source,
+        sourceLabel: actorContext?.sourceLabel,
+        roomNumber: updated.roomNumber,
+        roomName: updated.name,
+        displayName: formatRoomDisplayName(updated.roomNumber, updated.name),
+        note: normalizedAnnotation ? `房间备注已更新为 ${normalizedAnnotation}` : '房间备注已清空',
+      },
+      true,
+    );
+
+    return {
+      roomId: updated.id,
+      roomNumber: updated.roomNumber,
+      annotation: normalizeRoomAnnotation(updated.roomNumber, updated.name),
+      displayName: formatRoomDisplayName(updated.roomNumber, updated.name),
+    };
   }
 
   public async bulkControlDevices(

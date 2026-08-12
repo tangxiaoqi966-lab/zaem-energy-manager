@@ -28,11 +28,12 @@ async function main() {
   const adminPassword = await bcrypt.hash('admin123', 10);
   await prisma.user.upsert({
     where: { username: 'admin' },
-    update: { passwordHash: adminPassword },
+    update: {},
     create: {
       username: 'admin',
       passwordHash: adminPassword,
       name: '系统管理员',
+      mustChangePassword: true,
       roleId: adminRole.id,
     },
   });
@@ -40,7 +41,7 @@ async function main() {
   const bossPassword = await bcrypt.hash('boss123', 10);
   await prisma.user.upsert({
     where: { username: 'boss' },
-    update: { passwordHash: bossPassword },
+    update: {},
     create: {
       username: 'boss',
       passwordHash: bossPassword,
@@ -52,7 +53,7 @@ async function main() {
   const userPassword = await bcrypt.hash('user123', 10);
   await prisma.user.upsert({
     where: { username: 'user' },
-    update: { passwordHash: userPassword },
+    update: {},
     create: {
       username: 'user',
       passwordHash: userPassword,

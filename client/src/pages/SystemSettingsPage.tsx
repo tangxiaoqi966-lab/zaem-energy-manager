@@ -10,6 +10,9 @@ import {
   XCircle,
   LogIn,
   Info,
+  Shield,
+  UserPlus,
+  Trash2,
 } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
 import { Button } from '../components/ui/button'
@@ -25,10 +28,10 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Badge } from '../components/ui/badge'
 import { DevicesTable } from '../components/device/DevicesTable'
-import { dashboard, system } from '../lib/api'
+import { auth, dashboard, system } from '../lib/api'
 import { getSocket } from '../lib/socket'
 import { useAuthStore } from '../store/auth'
-import { UserRole, type SystemSettingsData } from '../types'
+import { UserRole, type SystemSettingsData, type UserManagementItem } from '../types'
 
 const REFRESH_INTERVAL_OPTIONS = [
   { label: '1 秒', value: 1000 },
@@ -50,11 +53,23 @@ const TIMEZONE_OPTIONS = [
 
 const XIAOMI_VERIFICATION_STORAGE_KEY = 'xiaomi_verification_pending'
 
+const ROLE_OPTIONS = [
+  { label: '超级管理员', value: UserRole.ADMIN },
+  { label: '管理员', value: UserRole.BOSS },
+  { label: '用户', value: UserRole.USER },
+]
+
+function getRoleLabel(role: UserRole) {
+  return ROLE_OPTIONS.find((item) => item.value === role)?.label ?? role
+}
+
 export function SystemSettingsPage() {
   const queryClient = useQueryClient()
-  const { hasPermission, isAuthenticated, token } = useAuthStore()
+  const { hasPermission, isAuthenticated, token, user } = useAuthStore()
   const canEdit = hasPermission([UserRole.ADMIN, UserRole.BOSS])
+  const canManageDevices = hasPermission([UserRole.ADMIN])
   const canManageXiaomi = hasPermission([UserRole.ADMIN])
+  const canManageUsers = hasPermission([UserRole.ADMIN])
   const canQueryProtectedApi = isAuthenticated && !!token
 
   const [formData, setFormData] = useState<Partial<SystemSettingsData>>({})
@@ -72,6 +87,15 @@ export function SystemSettingsPage() {
   const [verificationPending, setVerificationPending] = useState(false)
   const verificationWindowRef = useRef<Window | null>(null)
   const verificationRetryingRef = useRef(false)
+  const [newUserForm, setNewUserForm] = useState({
+    username: '',
+    password: '',
+    name: '',
+    role: UserRole.BOSS as UserRole,
+  })
+  const [userDrafts, setUserDrafts] = useState<
+    Record<string, { name: string; role: UserRole; password: string }>
+  >({})
 
   const { data: settings, isLoading } = useQuery({
     queryKey: ['system-settings'],
@@ -97,6 +121,13 @@ export function SystemSettingsPage() {
     staleTime: 1000 * 10,
   })
 
+  const { data: users = [] } = useQuery({
+    queryKey: ['auth-users'],
+    queryFn: auth.listUsers,
+    enabled: canQueryProtectedApi && canManageUsers,
+    retry: false,
+  })
+
   useEffect(() => {
     if (!canQueryProtectedApi) return
 
@@ -116,6 +147,22 @@ export function SystemSettingsPage() {
       setXiaomiUsername(xiaomiStatus.username)
     }
   }, [xiaomiStatus?.username, xiaomiUsername])
+
+  useEffect(() => {
+    if (!users.length) return
+
+    setUserDrafts((prev) => {
+      const next: Record<string, { name: string; role: UserRole; password: string }> = {}
+      users.forEach((item) => {
+        next[item.id] = {
+          name: prev[item.id]?.name ?? item.name,
+          role: prev[item.id]?.role ?? item.role,
+          password: '',
+        }
+      })
+      return next
+    })
+  }, [users])
 
   useEffect(() => {
     const pendingFromServer = !!xiaomiStatus?.auth?.needsVerification
@@ -227,6 +274,53 @@ export function SystemSettingsPage() {
     },
   })
 
+  const createUserMutation = useMutation({
+    mutationFn: auth.createUser,
+    onSuccess: () => {
+      toast.success('账号已创建')
+      queryClient.invalidateQueries({ queryKey: ['auth-users'] })
+      setNewUserForm({
+        username: '',
+        password: '',
+        name: '',
+        role: UserRole.BOSS,
+      })
+    },
+    onError: (error: Error) => {
+      toast.error(error?.message || '创建账号失败')
+    },
+  })
+
+  const updateUserMutation = useMutation({
+    mutationFn: ({ userId, data }: { userId: string; data: { name?: string; role?: UserRole; password?: string } }) =>
+      auth.updateUser(userId, data),
+    onSuccess: (_data, variables) => {
+      toast.success('账号已更新')
+      queryClient.invalidateQueries({ queryKey: ['auth-users'] })
+      setUserDrafts((prev) => ({
+        ...prev,
+        [variables.userId]: {
+          ...prev[variables.userId],
+          password: '',
+        },
+      }))
+    },
+    onError: (error: Error) => {
+      toast.error(error?.message || '更新账号失败')
+    },
+  })
+
+  const deleteUserMutation = useMutation({
+    mutationFn: auth.deleteUser,
+    onSuccess: () => {
+      toast.success('账号已删除')
+      queryClient.invalidateQueries({ queryKey: ['auth-users'] })
+    },
+    onError: (error: Error) => {
+      toast.error(error?.message || '删除账号失败')
+    },
+  })
+
   const getValue = <K extends keyof SystemSettingsData>(
     key: K,
     fallback?: SystemSettingsData[K]
@@ -261,6 +355,72 @@ export function SystemSettingsPage() {
     const merged: Partial<SystemSettingsData> = { ...settings, ...formData }
     setSaving(true)
     updateSettingsMutation.mutate(merged)
+  }
+
+  const handleCreateUser = () => {
+    if (!newUserForm.username.trim() || !newUserForm.name.trim() || !newUserForm.password.trim()) {
+      toast.error('请先填完整用户名、姓名和密码')
+      return
+    }
+
+    createUserMutation.mutate({
+      username: newUserForm.username.trim(),
+      name: newUserForm.name.trim(),
+      password: newUserForm.password,
+      role: newUserForm.role,
+    })
+  }
+
+  const handleUserDraftChange = (
+    userId: string,
+    patch: Partial<{ name: string; role: UserRole; password: string }>,
+  ) => {
+    setUserDrafts((prev) => ({
+      ...prev,
+      [userId]: {
+        name: prev[userId]?.name ?? '',
+        role: prev[userId]?.role ?? UserRole.USER,
+        password: prev[userId]?.password ?? '',
+        ...patch,
+      },
+    }))
+  }
+
+  const handleUpdateUser = (targetUser: UserManagementItem) => {
+    const draft = userDrafts[targetUser.id]
+    if (!draft) return
+
+    const payload: { name?: string; role?: UserRole; password?: string } = {}
+    if (draft.name.trim() && draft.name.trim() !== targetUser.name) {
+      payload.name = draft.name.trim()
+    }
+    if (draft.role !== targetUser.role) {
+      payload.role = draft.role
+    }
+    if (draft.password.trim()) {
+      payload.password = draft.password.trim()
+    }
+
+    if (!payload.name && !payload.role && !payload.password) {
+      toast.error('没有可保存的变更')
+      return
+    }
+
+    updateUserMutation.mutate({
+      userId: targetUser.id,
+      data: payload,
+    })
+  }
+
+  const handleDeleteUser = (targetUser: UserManagementItem) => {
+    if (targetUser.id === user?.id) {
+      toast.error('不能删除当前超级管理员自己')
+      return
+    }
+
+    const confirmed = window.confirm(`确认删除账号 ${targetUser.username} 吗？`)
+    if (!confirmed) return
+    deleteUserMutation.mutate(targetUser.id)
   }
 
   const handleXiaomiLogin = async () => {
@@ -478,8 +638,9 @@ export function SystemSettingsPage() {
       <Tabs defaultValue="params" className="w-full">
         <TabsList className="mb-6 h-auto w-full flex-wrap justify-start">
           <TabsTrigger value="params" className="text-xs sm:text-sm">系统参数</TabsTrigger>
-          <TabsTrigger value="devices" className="text-xs sm:text-sm">已识别设备</TabsTrigger>
+          {canManageDevices && <TabsTrigger value="devices" className="text-xs sm:text-sm">已识别设备</TabsTrigger>}
           {canManageXiaomi && <TabsTrigger value="xiaomi" className="text-xs sm:text-sm">米家同步</TabsTrigger>}
+          {canManageUsers && <TabsTrigger value="accounts" className="text-xs sm:text-sm">账号管理</TabsTrigger>}
         </TabsList>
 
         <TabsContent value="params">
@@ -638,6 +799,7 @@ export function SystemSettingsPage() {
           )}
         </TabsContent>
 
+        {canManageDevices && (
         <TabsContent value="devices">
           <Card>
             <CardHeader>
@@ -661,6 +823,7 @@ export function SystemSettingsPage() {
             </CardContent>
           </Card>
         </TabsContent>
+        )}
 
         {canManageXiaomi && (
         <TabsContent value="xiaomi">
@@ -955,6 +1118,192 @@ export function SystemSettingsPage() {
                     <li>说明：只封装官方集成协议，数据安全可靠</li>
                   </ul>
                 </div>
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+        )}
+
+        {canManageUsers && (
+        <TabsContent value="accounts">
+          <div className="grid gap-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-lg">
+                  <UserPlus className="h-5 w-5" />
+                  新增账号
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                  <div className="space-y-2">
+                    <Label htmlFor="new-user-username">用户名</Label>
+                    <Input
+                      id="new-user-username"
+                      placeholder="例如 manager01"
+                      value={newUserForm.username}
+                      onChange={(e) => setNewUserForm((prev) => ({ ...prev, username: e.target.value }))}
+                      disabled={createUserMutation.isPending}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="new-user-name">显示名称</Label>
+                    <Input
+                      id="new-user-name"
+                      placeholder="例如 值班管理员"
+                      value={newUserForm.name}
+                      onChange={(e) => setNewUserForm((prev) => ({ ...prev, name: e.target.value }))}
+                      disabled={createUserMutation.isPending}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="new-user-password">初始密码</Label>
+                    <Input
+                      id="new-user-password"
+                      type="password"
+                      placeholder="至少 6 位"
+                      value={newUserForm.password}
+                      onChange={(e) => setNewUserForm((prev) => ({ ...prev, password: e.target.value }))}
+                      disabled={createUserMutation.isPending}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="new-user-role">账号角色</Label>
+                    <Select
+                      value={newUserForm.role}
+                      onValueChange={(value) => setNewUserForm((prev) => ({ ...prev, role: value as UserRole }))}
+                      disabled={createUserMutation.isPending}
+                    >
+                      <SelectTrigger id="new-user-role">
+                        <SelectValue placeholder="选择角色" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {ROLE_OPTIONS.map((option) => (
+                          <SelectItem key={option.value} value={option.value}>
+                            {option.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+                <div className="flex justify-end">
+                  <Button onClick={handleCreateUser} disabled={createUserMutation.isPending}>
+                    <UserPlus className="mr-2 h-4 w-4" />
+                    {createUserMutation.isPending ? '创建中...' : '创建账号'}
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-lg">
+                  <Shield className="h-5 w-5" />
+                  账号权限管理
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {users.length === 0 ? (
+                  <div className="rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground">
+                    暂无账号数据
+                  </div>
+                ) : (
+                  users.map((account) => {
+                    const draft = userDrafts[account.id] ?? {
+                      name: account.name,
+                      role: account.role,
+                      password: '',
+                    }
+
+                    return (
+                      <div
+                        key={account.id}
+                        className="rounded-lg border bg-background p-4"
+                      >
+                        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                          <div className="space-y-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="font-medium text-foreground">{account.username}</span>
+                              <Badge variant={account.role === UserRole.ADMIN ? 'default' : 'secondary'}>
+                                {getRoleLabel(account.role)}
+                              </Badge>
+                              {account.id === user?.id && (
+                                <Badge variant="outline">当前账号</Badge>
+                              )}
+                            </div>
+                            <div className="text-xs text-muted-foreground">
+                              创建时间：{new Date(account.createdAt).toLocaleString()}
+                              {' · '}
+                              最近登录：{account.lastLoginAt ? new Date(account.lastLoginAt).toLocaleString() : '未登录过'}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="grid gap-4 md:grid-cols-3">
+                          <div className="space-y-2">
+                            <Label htmlFor={`user-name-${account.id}`}>显示名称</Label>
+                            <Input
+                              id={`user-name-${account.id}`}
+                              value={draft.name}
+                              onChange={(e) => handleUserDraftChange(account.id, { name: e.target.value })}
+                              disabled={updateUserMutation.isPending}
+                            />
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor={`user-role-${account.id}`}>账号角色</Label>
+                            <Select
+                              value={draft.role}
+                              onValueChange={(value) => handleUserDraftChange(account.id, { role: value as UserRole })}
+                              disabled={updateUserMutation.isPending || account.id === user?.id}
+                            >
+                              <SelectTrigger id={`user-role-${account.id}`}>
+                                <SelectValue placeholder="选择角色" />
+                              </SelectTrigger>
+                              <SelectContent>
+                                {ROLE_OPTIONS.map((option) => (
+                                  <SelectItem key={option.value} value={option.value}>
+                                    {option.label}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="space-y-2">
+                            <Label htmlFor={`user-password-${account.id}`}>重置密码</Label>
+                            <Input
+                              id={`user-password-${account.id}`}
+                              type="password"
+                              placeholder="留空表示不修改"
+                              value={draft.password}
+                              onChange={(e) => handleUserDraftChange(account.id, { password: e.target.value })}
+                              disabled={updateUserMutation.isPending}
+                            />
+                          </div>
+                        </div>
+
+                        <div className="mt-4 flex flex-wrap justify-end gap-3">
+                          <Button
+                            variant="outline"
+                            onClick={() => handleUpdateUser(account)}
+                            disabled={updateUserMutation.isPending}
+                          >
+                            <Save className="mr-2 h-4 w-4" />
+                            保存账号
+                          </Button>
+                          <Button
+                            variant="destructive"
+                            onClick={() => handleDeleteUser(account)}
+                            disabled={deleteUserMutation.isPending || account.id === user?.id}
+                          >
+                            <Trash2 className="mr-2 h-4 w-4" />
+                            删除账号
+                          </Button>
+                        </div>
+                      </div>
+                    )
+                  })
+                )}
               </CardContent>
             </Card>
           </div>

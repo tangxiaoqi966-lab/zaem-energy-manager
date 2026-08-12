@@ -7,6 +7,7 @@ export interface DashboardSpaceCard {
   subtitle: string;
   roomId: string | null;
   roomNumber: string | null;
+  roomAnnotation: string | null;
   status: RoomStatus;
   power: number;
   todayUsage: number;
@@ -16,6 +17,9 @@ export interface DashboardSpaceCard {
   limitEnabled: boolean;
   cutoff: boolean;
   deviceOnline: boolean;
+  powerActionCooldownUntil: string | null;
+  powerActionRetryAfterSeconds: number;
+  powerActionLastType: 'cutoff_power' | 'restore_power' | null;
   devices: DeviceItem[];
   mapped: boolean;
 }

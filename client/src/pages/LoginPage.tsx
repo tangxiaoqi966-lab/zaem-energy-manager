@@ -69,6 +69,10 @@ export function LoginPage() {
       } catch {
       }
       toast.success('登录成功');
+      if (res.user.mustChangePassword) {
+        navigate('/force-change-password', { replace: true });
+        return;
+      }
       const from = (location.state as { from?: Location })?.from;
       navigate(from?.pathname ?? '/', { replace: true });
     } catch (err: unknown) {

@@ -512,6 +512,38 @@ export const renameDevice = async (
   }
 };
 
+export const updateRoomAnnotation = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const { roomId } = req.params;
+    const { annotation } = (req.body ?? {}) as { annotation?: string };
+    const operatorUserId = req.user!.id;
+
+    if (!roomId) {
+      res.status(400).json({ code: 'ROOM_ID_REQUIRED', message: '缺少房间 ID' });
+      return;
+    }
+
+    if (typeof annotation !== 'string') {
+      res.status(400).json({ code: 'ANNOTATION_REQUIRED', message: '备注内容格式不正确' });
+      return;
+    }
+
+    const updated = await systemService.updateRoomAnnotation(
+      roomId,
+      annotation,
+      operatorUserId,
+      getOperationActorContextFromRequest(req),
+    );
+    res.json(updated);
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const bulkControlDevices = async (
   req: Request,
   res: Response,

@@ -12,6 +12,7 @@ export interface OperationActorContext {
   source?: OperationSource;
   sourceLabel?: string;
   ip?: string | null;
+  locationLabel?: string | null;
   userAgent?: string | null;
   deviceLabel?: string | null;
 }
@@ -45,8 +46,11 @@ export interface OperationDetailsPayload {
   actionResult?: string | null;
   successCount?: number | null;
   failedCount?: number | null;
+  skippedCount?: number | null;
   totalCount?: number | null;
   failedDevices?: string[] | null;
+  failedRooms?: string[] | null;
+  skippedRooms?: string[] | null;
   [key: string]: unknown;
 }
 
@@ -74,15 +78,25 @@ export function parseOperationDetails(
     return '';
   }
 
-  try {
-    const parsed = JSON.parse(details);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as OperationDetailsPayload;
+  let current: unknown = details;
+
+  for (let i = 0; i < 2; i += 1) {
+    if (typeof current !== 'string') {
+      break;
     }
-  } catch {
+
+    try {
+      const parsed = JSON.parse(current);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as OperationDetailsPayload;
+      }
+      current = parsed;
+    } catch {
+      break;
+    }
   }
 
-  return details;
+  return typeof current === 'string' ? current : details;
 }
 
 export function getOperationSourceLabel(source?: string | null): string | null {
@@ -145,10 +159,6 @@ function formatRoomLabel(parsed: OperationDetailsPayload): string | null {
     typeof parsed.roomNumber === 'string' && parsed.roomNumber.trim()
       ? parsed.roomNumber.trim()
       : null;
-
-  if (displayName && roomNumber && displayName !== roomNumber) {
-    return `${displayName} (${roomNumber})`;
-  }
 
   return displayName || roomNumber;
 }
@@ -238,7 +248,10 @@ export function formatOperationDetailsText(
     return parsed;
   }
 
-  const actionLabel = parsed.actionLabel || getDefaultActionLabel(type);
+  const actionLabel =
+    parsed.actionLabel ||
+    inferActionLabel(type, parsed) ||
+    getDefaultActionLabel(type);
   const sourceLabel = parsed.sourceLabel || getOperationSourceLabel(parsed.source);
   const roomLabel = formatRoomLabel(parsed);
   const deviceLabel = formatDeviceLabel(parsed);
@@ -268,8 +281,11 @@ export function formatOperationDetailsText(
   pushLine(lines, '删除数量', parsed.deletedCount);
   pushLine(lines, '成功数量', parsed.successCount);
   pushLine(lines, '失败数量', parsed.failedCount);
+  pushLine(lines, '跳过数量', parsed.skippedCount);
   pushLine(lines, '总数量', parsed.totalCount);
   pushLine(lines, '失败设备', parsed.failedDevices?.join('，'));
+  pushLine(lines, '失败房间', parsed.failedRooms?.join('，'));
+  pushLine(lines, '跳过房间', parsed.skippedRooms?.join('，'));
   pushLine(lines, '登录账号', parsed.username);
   pushLine(lines, '登录地址', parsed.loginAddress || parsed.ip);
   pushLine(lines, '登录设备', parsed.loginDevice || parsed.deviceLabel);
@@ -295,7 +311,7 @@ export function getOperationActorLabel(
   }
 
   if (parsed.source === 'system_auto') {
-    return '系统自动';
+    return '系统';
   }
 
   if (parsed.username) {
@@ -303,4 +319,54 @@ export function getOperationActorLabel(
   }
 
   return null;
+}
+
+function inferActionLabel(
+  type: OperationType,
+  parsed: OperationDetailsPayload,
+): string | null {
+  switch (parsed.action) {
+    case 'turn_on':
+      return parsed.source === 'system_auto' ? '自动开电' : '手动开电';
+    case 'turn_off':
+      return parsed.source === 'system_auto' ? '自动断电' : '手动断电';
+    case 'login_success':
+      return '登录';
+    case 'login_failed':
+      return '登录失败';
+    case 'logout':
+      return '退出登录';
+    case 'rename_device':
+      return '修改空间名称';
+    case 'update_room_annotation':
+      return '修改房间备注';
+    case 'bulk_device_control':
+      return parsed.powerAction === 'on' ? '批量开启设备电源' : '批量关闭设备电源';
+    case 'auto_restore_task_started':
+      return '自动恢复任务开始';
+    case 'auto_restore_task_completed':
+      return '自动恢复任务完成';
+    case 'auto_restore_task_failed':
+      return '自动恢复任务失败';
+    case 'auto_restore_task_skipped':
+      return '自动恢复任务跳过';
+    case 'auto_cutoff_skipped':
+      return '自动断电跳过';
+    case 'auto_restore_skipped':
+      return '自动恢复供电跳过';
+    case 'manual_cutoff':
+      return '手动断电';
+    case 'manual_restore':
+      return '手动恢复供电';
+    case 'auto_cutoff':
+      return '自动断电';
+    case 'auto_restore':
+      return '自动恢复供电';
+    default:
+      return type === OperationType.control_device && parsed.powerAction
+        ? parsed.powerAction === 'on'
+          ? '开启设备电源'
+          : '关闭设备电源'
+        : null;
+  }
 }
