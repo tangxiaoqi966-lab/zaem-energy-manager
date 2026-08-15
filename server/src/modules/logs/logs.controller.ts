@@ -22,10 +22,12 @@ export const getOperationLogs = async (
   try {
     const page = parseQueryInt(req.query.page as string | undefined, 1);
     const pageSize = parseQueryInt(req.query.pageSize as string | undefined, 20);
+    const siteId = req.query.siteId as string | undefined;
     const type = req.query.type as OperationType | undefined;
     const userId = req.query.userId as string | undefined;
     const roomId = req.query.roomId as string | undefined;
     const roomNumber = req.query.roomNumber as string | undefined;
+    const category = req.query.category as string | undefined;
     const keyword = req.query.keyword as string | undefined;
     const startDate =
       (req.query.startDate as string | undefined) ??
@@ -37,10 +39,12 @@ export const getOperationLogs = async (
     const result = await logsService.getOperationLogs({
       page,
       pageSize,
+      siteId,
       type,
       userId,
       roomId,
       roomNumber,
+      category,
       keyword,
       startDate,
       endDate,
@@ -63,6 +67,7 @@ export const getAlarmLogs = async (
   try {
     const page = parseQueryInt(req.query.page as string | undefined, 1);
     const pageSize = parseQueryInt(req.query.pageSize as string | undefined, 20);
+    const siteId = req.query.siteId as string | undefined;
     const type = req.query.type as AlarmType | undefined;
     const level = req.query.level as AlarmLevel | undefined;
     const roomNumber = req.query.roomNumber as string | undefined;
@@ -77,6 +82,7 @@ export const getAlarmLogs = async (
     const result = await logsService.getAlarmLogs({
       page,
       pageSize,
+      siteId,
       type,
       level,
       roomNumber,
@@ -97,6 +103,7 @@ export const clearAlarmLogs = async (
   next: NextFunction,
 ): Promise<void> => {
   try {
+    const siteId = req.body?.siteId as string | undefined;
     const type = req.body?.type as AlarmType | undefined;
     const level = req.body?.level as AlarmLevel | undefined;
     const roomNumber = req.body?.roomNumber as string | undefined;
@@ -110,6 +117,7 @@ export const clearAlarmLogs = async (
       {
         type,
         level,
+        siteId,
         roomNumber,
         resolved,
         startDate,

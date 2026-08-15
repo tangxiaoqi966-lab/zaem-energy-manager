@@ -95,9 +95,21 @@ export function getDayKey(
   return buildDayKey(parts.year, parts.month, parts.day);
 }
 
-export function dayKeyToDate(dayKey: string): Date {
+export function dayKeyToDate(
+  dayKey: string,
+  timeZone: string = DEFAULT_BUSINESS_TIMEZONE,
+): Date {
   const [year, month, day] = dayKey.split('-').map(Number);
-  return new Date(year, (month || 1) - 1, day || 1);
+  const normalizedTimeZone = normalizeBusinessTimeZone(timeZone);
+  return zonedTimeToUtc(
+    year,
+    (month || 1) - 1,
+    day || 1,
+    0,
+    0,
+    0,
+    normalizedTimeZone,
+  );
 }
 
 export function zonedTimeToUtc(
@@ -141,7 +153,7 @@ export function getBusinessDate(
   date: Date = new Date(),
   timeZone: string = DEFAULT_BUSINESS_TIMEZONE,
 ): Date {
-  return dayKeyToDate(getDayKey(date, timeZone));
+  return getBusinessDayStartUtc(date, timeZone);
 }
 
 export function addDays(date: Date, days: number): Date {

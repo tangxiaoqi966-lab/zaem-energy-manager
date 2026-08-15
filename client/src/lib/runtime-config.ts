@@ -12,7 +12,25 @@ function getRuntimeWindow(): RuntimeWindow {
   return window as RuntimeWindow;
 }
 
+function isLocalDevHost(): boolean {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  const host = window.location.hostname.toLowerCase();
+  return (
+    host === 'localhost' ||
+    host === '127.0.0.1' ||
+    host === '0.0.0.0' ||
+    host.endsWith('.local')
+  );
+}
+
 export function getRuntimeConfig(): RuntimeConfig {
+  if (import.meta.env.DEV && isLocalDevHost()) {
+    // Local development must use the Vite proxy instead of the deployed runtime config.
+    return {};
+  }
   return getRuntimeWindow().__ZAEM_RUNTIME_CONFIG__ ?? {};
 }
 

@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE "EnergyLimit"
+ADD COLUMN "monthlyCostLimit" DOUBLE PRECISION NOT NULL DEFAULT 0,
+ADD COLUMN "costEnabled" BOOLEAN NOT NULL DEFAULT false;

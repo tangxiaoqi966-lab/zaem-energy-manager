@@ -1,4 +1,11 @@
-import { PrismaClient, UserRole, RoomStatus } from '@prisma/client';
+import {
+  PrismaClient,
+  UserRole,
+  RoomStatus,
+  SiteAdapterType,
+  NodeType,
+  NodeStatus,
+} from '@prisma/client';
 import { ROOM_NUMBERS } from '../../shared';
 import bcrypt from 'bcryptjs';
 
@@ -23,6 +30,49 @@ async function main() {
     where: { name: UserRole.user },
     update: {},
     create: { name: UserRole.user },
+  });
+
+  const defaultSite = await prisma.site.upsert({
+    where: { code: 'region-1' },
+    update: {
+      name: '区域1',
+      adapterType: SiteAdapterType.xiaomi_cloud,
+      isPrimary: true,
+      storageRetentionDays: 365,
+    },
+    create: {
+      code: 'region-1',
+      name: '区域1',
+      description: '默认主控区域',
+      adapterType: SiteAdapterType.xiaomi_cloud,
+      isPrimary: true,
+      storageRetentionDays: 365,
+    },
+  });
+
+  await prisma.edgeNode.upsert({
+    where: {
+      siteId_code: {
+        siteId: defaultSite.id,
+        code: 'master-1',
+      },
+    },
+    update: {
+      name: '主控节点',
+      nodeType: NodeType.master,
+      status: NodeStatus.online,
+      storageRetentionDays: 90,
+      isLocalControlEnabled: true,
+    },
+    create: {
+      siteId: defaultSite.id,
+      code: 'master-1',
+      name: '主控节点',
+      nodeType: NodeType.master,
+      status: NodeStatus.online,
+      storageRetentionDays: 90,
+      isLocalControlEnabled: true,
+    },
   });
 
   const adminPassword = await bcrypt.hash('admin123', 10);
@@ -65,9 +115,15 @@ async function main() {
   for (const roomNumber of ROOM_NUMBERS) {
     const floor = parseInt(roomNumber.charAt(0));
     await prisma.room.upsert({
-      where: { roomNumber },
+      where: {
+        siteId_roomNumber: {
+          siteId: defaultSite.id,
+          roomNumber,
+        },
+      },
       update: {},
       create: {
+        siteId: defaultSite.id,
         roomNumber,
         name: `${roomNumber}号房间`,
         floor,

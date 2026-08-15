@@ -31,11 +31,12 @@ const menuItems = [
 export function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
-  const { user, logout } = useAuthStore();
+  const { user, logout, isAuthenticated } = useAuthStore();
   const { sidebarOpen, toggleSidebar, setSidebarOpen } = useUiStore();
   const { data: alarmSummary } = useQuery({
     queryKey: ['sidebar-alarm-summary'],
     queryFn: () => api.logs.alarms({ page: 1, pageSize: 1, resolved: false }),
+    enabled: isAuthenticated,
     refetchOnWindowFocus: false,
     refetchInterval: 5000,
     refetchIntervalInBackground: true,
@@ -74,16 +75,16 @@ export function AppLayout() {
         className={cn(
           'fixed inset-y-0 left-0 z-40 flex h-full flex-col border-r bg-card transition-transform duration-200 md:static md:z-auto',
           sidebarOpen ? 'translate-x-0' : '-translate-x-full md:translate-x-0',
-          'w-[84vw] max-w-[280px] md:w-56'
+          'w-[80vw] max-w-[256px] md:w-[13rem]'
         )}
       >
-        <div className="flex h-16 items-center justify-between px-4">
+        <div className="flex h-14 items-center justify-between px-3">
           <span className="text-xl font-bold tracking-tight">ZHIRAI</span>
         </div>
 
         <Separator />
 
-        <nav className="flex-1 space-y-1 p-2">
+        <nav className="flex-1 space-y-1 p-1.5">
           {menuItems.map(({ to, icon: Icon, label, end }) => (
             <NavLink
               key={to}
@@ -116,7 +117,7 @@ export function AppLayout() {
 
         <Separator />
 
-        <div className="p-2">
+        <div className="p-1.5">
           <div
             className={cn(
               'flex items-center gap-3 rounded-md p-2 justify-start'
@@ -160,7 +161,7 @@ export function AppLayout() {
           </div>
         </header>
 
-        <main className="flex-1 overflow-auto p-3 sm:p-4 md:p-6">
+        <main className="flex-1 overflow-auto p-2.5 sm:p-3 md:p-3.5">
           <Outlet />
         </main>
       </div>

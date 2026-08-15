@@ -10,7 +10,9 @@ import {
   checkAndTriggerAlarms,
   computeRoomRealtime,
   isRoomOverDailyLimit,
+  isRoomOverMonthlyCostLimit,
 } from '../modules/energy/energy.service';
+import { persistNetworkHistory } from '../modules/dashboard/dashboard.service';
 import { broadcastDashboard } from './socket';
 import {
   DEFAULT_BUSINESS_TIMEZONE,
@@ -36,6 +38,7 @@ async function dailyResetTask(): Promise<boolean> {
         actionLabel: '自动恢复任务跳过',
         source: 'system_auto',
         sourceLabel: '系统自动',
+        resultLabel: '跳过',
         note: '系统设置已关闭自动恢复供电',
       },
       true,
@@ -47,25 +50,12 @@ async function dailyResetTask(): Promise<boolean> {
     where: { cutoff: true },
     include: {
       energyLimit: {
-        select: { enabled: true },
+        select: { enabled: true, costEnabled: true },
       },
     },
   });
 
   if (cutoffRooms.length === 0) {
-    await writeOperation(
-      null,
-      OperationType.restore_power,
-      null,
-      {
-        action: 'auto_restore_task_skipped',
-        actionLabel: '自动恢复任务跳过',
-        source: 'system_auto',
-        sourceLabel: '系统自动',
-        note: '当前没有处于断电状态的房间',
-      },
-      true,
-    );
     return true;
   }
 
@@ -89,7 +79,7 @@ async function dailyResetTask(): Promise<boolean> {
   const failedRooms: string[] = [];
   const skippedRooms: string[] = [];
   for (const room of cutoffRooms) {
-    if (!room.energyLimit?.enabled) {
+    if (!room.energyLimit?.enabled && !room.energyLimit?.costEnabled) {
       skippedRooms.push(formatRoomDisplayName(room.roomNumber, room.name));
       continue;
     }
@@ -116,6 +106,7 @@ async function dailyResetTask(): Promise<boolean> {
       actionLabel: allSucceeded ? '自动恢复任务完成' : '自动恢复任务失败',
       source: 'system_auto',
       sourceLabel: '系统自动',
+      resultLabel: allSucceeded ? '完成' : '失败',
       totalCount: cutoffRooms.length,
       successCount,
       failedCount: failedRooms.length,
@@ -132,6 +123,14 @@ async function dailyResetTask(): Promise<boolean> {
   );
 
   return allSucceeded;
+}
+
+async function refreshReferencePriceTask(): Promise<void> {
+  try {
+    await systemService.refreshReferenceElectricityPriceIfNeeded();
+  } catch (error) {
+    console.warn('[cron] refresh reference price failed:', error);
+  }
 }
 
 async function accumulateRoomEnergy(roomId: string, businessTimeZone: string): Promise<void> {
@@ -243,10 +242,14 @@ async function aggregateMonthly(roomId: string, businessToday: Date): Promise<vo
 async function syncDataTask(): Promise<void> {
   try {
     await xiaomiAdapter.refreshAllRoomsRealtime();
+    await systemService.refreshLanCameraStatuses().catch(() => {});
+    await systemService.refreshDashboardNetworkRuntimes().catch(() => {});
     const businessTimeZone = await systemService.getSetting(
       'businessTimezone',
       DEFAULT_BUSINESS_TIMEZONE,
     );
+    await persistNetworkHistory(businessTimeZone).catch(() => {});
+    await refreshReferencePriceTask();
 
     const rooms = await prisma.room.findMany({
       include: { energyLimit: true, devices: true },
@@ -270,8 +273,11 @@ async function syncDataTask(): Promise<void> {
         if (autoCutoff) {
           const realtime = await computeRoomRealtime(room);
           if (
-            realtime.limitEnabled &&
-            isRoomOverDailyLimit(realtime.todayUsage, realtime.dailyLimit)
+            (realtime.limitEnabled || realtime.costLimitEnabled) &&
+            (
+              isRoomOverDailyLimit(realtime.todayUsage, realtime.dailyLimit) ||
+              isRoomOverMonthlyCostLimit(realtime.monthCost, realtime.monthlyCostLimit)
+            )
           ) {
             try {
               await cutoffPower(room.id, undefined as any, true);

@@ -3,7 +3,7 @@ import { xiaomiAdapter } from '../system/xiaomi.adapter';
 import { writeOperation } from '../../lib/logger';
 import { AppError } from '../../lib/errors';
 import { systemService } from '../system/system.service';
-import { broadcastDashboard } from '../../lib/socket';
+import { broadcastAlarm, broadcastDashboard, broadcastRoom } from '../../lib/socket';
 import {
   RoomStatus,
   AlarmType,
@@ -21,6 +21,8 @@ import {
   RankingItem,
   DeviceItem,
   DeviceStatus,
+  SystemSettingsData,
+  inferDeviceCategory,
 } from '@shared/index';
 import {
   DEFAULT_BUSINESS_TIMEZONE,
@@ -38,6 +40,7 @@ const AUTO_RESTORE_CONFIRMATION_OPTIONS = {
   maxAttempts: 4,
 };
 const LIMIT_EXCEEDED_EPSILON_KWH = 0.001;
+const LIMIT_EXCEEDED_EPSILON_COST = 0.01;
 
 const PRISMA_TO_SHARED_DEVICE_STATUS_ENERGY: Record<PrismaDeviceStatus, DeviceStatus> =
   {
@@ -46,15 +49,142 @@ const PRISMA_TO_SHARED_DEVICE_STATUS_ENERGY: Record<PrismaDeviceStatus, DeviceSt
     unknown: DeviceStatus.UNKNOWN,
   };
 
+function tryParseJsonModel(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'string') return null;
+  try {
+    const obj = JSON.parse(value);
+    return obj && typeof obj === 'object' ? (obj as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function pickModelText(modelValue: unknown): string {
+  if (typeof modelValue !== 'string') return String(modelValue ?? '');
+  const obj = tryParseJsonModel(modelValue);
+  if (!obj) {
+    const s = modelValue;
+    const mac = (s.match(/"macAddress"\s*:\s*"([^"]+)"/) || [])[1] || '';
+    const vendor = (s.match(/"vendorName"\s*:\s*"([^"]+)"/) || [])[1] || '';
+    const ip = (s.match(/"ipAddress"\s*:\s*"([^"]+)"/) || [])[1] || '';
+    if (vendor) return vendor;
+    if (mac || ip) return [mac, ip].filter(Boolean).join(' / ') || s.slice(0, 60);
+    if (s.startsWith('{') && s.length > 120) return s.slice(0, 60) + '…';
+    return s;
+  }
+  const cam = (obj.camera && typeof obj.camera === 'object') ? (obj.camera as Record<string, unknown>) : null;
+  const camModel = cam && (typeof cam.manualModel === 'string' || typeof cam.model === 'string')
+    ? String((cam as any).manualModel || (cam as any).model || '').trim()
+    : '';
+  const camBrand = cam && (typeof cam.manualBrand === 'string' || typeof cam.brand === 'string')
+    ? String((cam as any).manualBrand || (cam as any).brand || '').trim()
+    : '';
+  const cpe = (obj.fiveGCpe && typeof obj.fiveGCpe === 'object') ? (obj.fiveGCpe as Record<string, unknown>) : null;
+  const cpeModel = cpe && typeof cpe.model === 'string' ? String(cpe.model).trim() : '';
+  const wifi = (obj.wifiAp && typeof obj.wifiAp === 'object') ? (obj.wifiAp as Record<string, unknown>) : null;
+  const wifiModel = wifi && typeof wifi.model === 'string' ? String(wifi.model).trim() : '';
+  const raw = (typeof (obj as any)._raw === 'string' && (obj as any)._raw) ? String((obj as any)._raw) : '';
+  const brand = (typeof obj.brand === 'string' && obj.brand) ? String(obj.brand) : '';
+  const vendor = (typeof obj.vendorName === 'string' && obj.vendorName) ? String(obj.vendorName) : '';
+  return camModel || cpeModel || wifiModel || brand || camBrand || vendor || raw || modelValue;
+}
+
+function normalizeVendorName(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text) return null;
+  if (/^(?:\*?\s*no company\s*\*?|unknown|n\/a|null|undefined|--?)$/i.test(text)) return null;
+  return text;
+}
+
+const XIAOMI_STALE_OFFLINE_THRESHOLD_MS = 20 * 60 * 1000;
+
 function toDeviceItem(d: any): DeviceItem {
   const prismaStatus = (d.status ?? 'unknown') as PrismaDeviceStatus;
   const sharedStatus =
     PRISMA_TO_SHARED_DEVICE_STATUS_ENERGY[prismaStatus] ?? DeviceStatus.UNKNOWN;
+  const parsedModel = tryParseJsonModel(d.model);
+  const macAddress = (parsedModel && typeof parsedModel.macAddress === 'string') ? parsedModel.macAddress : null;
+  const rawMac = String(macAddress ?? '').trim().toUpperCase().replace(/[^A-F0-9]/g, '');
+  const ipAddress = (parsedModel && typeof parsedModel.ipAddress === 'string') ? parsedModel.ipAddress : null;
+  const vendorName =
+    normalizeVendorName(parsedModel && typeof parsedModel.vendorName === 'string' ? parsedModel.vendorName : null) ??
+    normalizeVendorName(parsedModel && typeof parsedModel.brand === 'string' ? parsedModel.brand : null);
+  const adapterConfig =
+    parsedModel && parsedModel.adapterConfig && typeof parsedModel.adapterConfig === 'object'
+      ? (parsedModel.adapterConfig as Record<string, unknown>)
+      : null;
+  const modelText = pickModelText(d.model);
+  const category = inferDeviceCategory({
+    name: d.name,
+    model: modelText,
+    vendor: vendorName,
+    mac: rawMac.length === 12 ? rawMac : null,
+    ip: ipAddress,
+  });
+  const adapterHaystack = `${d.name ?? ''} ${vendorName ?? ''} ${modelText ?? ''}`.toLowerCase();
+  const adapterKind =
+    adapterConfig && (adapterConfig.kind === 'huawei_cpe' || adapterConfig.kind === 'nokia_beacon')
+      ? (adapterConfig.kind as 'huawei_cpe' | 'nokia_beacon')
+      : category === shared_types.DeviceCategory.FIVE_G_CPE
+        ? 'huawei_cpe'
+        : category === shared_types.DeviceCategory.WIFI_AP && /(nokia|beacon|ha-020)/i.test(adapterHaystack)
+          ? 'nokia_beacon'
+          : category === shared_types.DeviceCategory.WIFI_AP && !!ipAddress && /\.1$/.test(ipAddress) && !/(nokia|beacon|ha-020)/i.test(adapterHaystack)
+            ? 'huawei_cpe'
+            : null;
+  const normalizedVendorName =
+    vendorName ?? (adapterKind === 'huawei_cpe' ? 'Huawei' : adapterKind === 'nokia_beacon' ? 'Nokia' : null);
+  const ownership = (
+    parsedModel && typeof parsedModel.ownership === 'string' ? parsedModel.ownership : null
+  ) as DeviceItem['ownership'];
+  const source = (
+    parsedModel && typeof parsedModel.source === 'string' ? parsedModel.source : null
+  ) as DeviceItem['source'];
+  let cameraRuntime: DeviceItem['camera'] = null;
+  if (parsedModel && parsedModel.camera && typeof parsedModel.camera === 'object') {
+    const c = parsedModel.camera as Record<string, unknown>;
+    const candidates = Array.isArray((c as any).snapshotCandidates) ? (c as any).snapshotCandidates : null;
+    const manualUrl = typeof (c as any).manualSnapshotUrl === 'string' ? (c as any).manualSnapshotUrl : null;
+    const firstHttp = (manualUrl && /^https?:/i.test(manualUrl))
+      ? { url: manualUrl }
+      : (candidates as Array<Record<string, unknown>> | null)?.find((x) =>
+          typeof x?.url === 'string' && /^https?:/i.test(x.url as string),
+        );
+    const brandRaw = typeof (c as any).manualBrand === 'string' ? (c as any).manualBrand : (c as any).brand;
+    const modelRaw = typeof (c as any).manualModel === 'string' ? (c as any).manualModel : (c as any).model;
+    cameraRuntime = {
+      online: prismaStatus === 'online' && !!(c as any).online,
+      snapshotUrl: firstHttp && typeof firstHttp.url === 'string' ? firstHttp.url : null,
+      streamUrl: null,
+      hdStreamUrl: null,
+      brand: typeof brandRaw === 'string' ? brandRaw : null,
+      model: typeof modelRaw === 'string' ? modelRaw : null,
+      hasAudio: typeof (c as any).hasAudio === 'boolean' ? (c as any).hasAudio : undefined,
+      hasNightVision: typeof (c as any).hasNightVision === 'boolean' ? (c as any).hasNightVision : undefined,
+      lastMotionAt: typeof (c as any).lastMotionAt === 'string' ? (c as any).lastMotionAt : null,
+    };
+  }
+  let wifiApRuntime: DeviceItem['wifiAp'] = null;
+  if (parsedModel && parsedModel.wifiAp && typeof parsedModel.wifiAp === 'object') {
+    wifiApRuntime = parsedModel.wifiAp as any;
+  } else if (parsedModel && parsedModel.runtime && typeof parsedModel.runtime === 'object' && (parsedModel.runtime as any).wifiAp) {
+    wifiApRuntime = (parsedModel.runtime as any).wifiAp as any;
+  }
+  let fiveGCpeRuntime: DeviceItem['fiveGCpe'] = null;
+  if (parsedModel && (parsedModel as any).fiveGCpe && typeof (parsedModel as any).fiveGCpe === 'object') {
+    fiveGCpeRuntime = (parsedModel as any).fiveGCpe as any;
+  } else if (parsedModel && parsedModel.runtime && typeof parsedModel.runtime === 'object' && (parsedModel.runtime as any).fiveGCpe) {
+    fiveGCpeRuntime = (parsedModel.runtime as any).fiveGCpe as any;
+  }
   return {
     id: d.id,
     did: d.did,
+    siteId: d.siteId,
+    siteName: d.site?.name ?? '默认区域',
     name: d.name,
-    model: d.model,
+    model: modelText,
+    category,
     status: sharedStatus,
     roomId: d.roomId ?? null,
     roomNumber: d.room?.roomNumber ?? null,
@@ -64,6 +194,15 @@ function toDeviceItem(d: any): DeviceItem {
     voltageV: d.voltageV ?? null,
     totalKwh: d.totalKwh ?? null,
     lastSyncAt: d.lastSyncAt ? new Date(d.lastSyncAt).toISOString() : null,
+    ownership: d.did?.startsWith?.('LAN_') ? 'other' : ownership ?? null,
+    source: d.did?.startsWith?.('LAN_') ? 'lan_discovery' : source ?? null,
+    macAddress,
+    ipAddress,
+    vendorName: normalizedVendorName,
+    adapterKind,
+    camera: cameraRuntime,
+    wifiAp: wifiApRuntime,
+    fiveGCpe: fiveGCpeRuntime,
   };
 }
 
@@ -193,6 +332,97 @@ export function isRoomOverDailyLimit(
   return todayUsage > dailyLimit + LIMIT_EXCEEDED_EPSILON_KWH;
 }
 
+export function isRoomOverMonthlyCostLimit(
+  monthCost: number,
+  monthlyCostLimit: number | null | undefined,
+): boolean {
+  if (monthlyCostLimit == null || monthlyCostLimit <= 0) {
+    return false;
+  }
+
+  return monthCost > monthlyCostLimit + LIMIT_EXCEEDED_EPSILON_COST;
+}
+
+type AutoCutoffReason =
+  | {
+      type: 'daily';
+      note: string;
+      alarmMessage: string;
+    }
+  | {
+      type: 'cost';
+      note: string;
+      alarmMessage: string;
+    };
+
+function resolveAutoCutoffReason(realtime: Pick<
+  RealtimeEnergyData,
+  'todayUsage' | 'dailyLimit' | 'limitEnabled' | 'monthCost' | 'monthlyCostLimit' | 'costLimitEnabled'
+>): AutoCutoffReason | null {
+  if (realtime.limitEnabled && isRoomOverDailyLimit(realtime.todayUsage, realtime.dailyLimit)) {
+    return {
+      type: 'daily',
+      note: `今日用电 ${realtime.todayUsage.toFixed(3)} kWh，已超出日限额 ${realtime.dailyLimit.toFixed(3)} kWh，执行自动断电`,
+      alarmMessage: '已超出日限额，系统已自动断电',
+    };
+  }
+
+  if (realtime.costLimitEnabled && isRoomOverMonthlyCostLimit(realtime.monthCost, realtime.monthlyCostLimit)) {
+    return {
+      type: 'cost',
+      note: `本月费用 ${realtime.monthCost.toFixed(2)} EUR，已超出费用限额 ${realtime.monthlyCostLimit.toFixed(2)} EUR，执行自动断电`,
+      alarmMessage: '已超出本月费用限额，系统已自动断电',
+    };
+  }
+
+  return null;
+}
+
+type DailyLimitSettings = Pick<
+  SystemSettingsData,
+  | 'businessTimezone'
+  | 'defaultDailyLimitKwh'
+  | 'defaultDailyLimitUseWeeklyRules'
+  | 'defaultDailyLimitWeekdayKwh'
+  | 'defaultDailyLimitSaturdayKwh'
+  | 'defaultDailyLimitSundayKwh'
+  | 'defaultDailyLimitUseHolidayRules'
+  | 'defaultDailyLimitHolidayKwh'
+  | 'defaultDailyLimitHolidayDates'
+>;
+
+function parseHolidayDateSet(raw: string | null | undefined): Set<string> {
+  return new Set(
+    String(raw ?? '')
+      .split(/[\s,;\n\r]+/)
+      .map((item) => item.trim())
+      .filter((item) => /^\d{4}-\d{2}-\d{2}$/.test(item)),
+  );
+}
+
+function resolveSystemDailyLimit(settings: DailyLimitSettings, now = new Date()): number {
+  const businessToday = getBusinessDate(now, settings.businessTimezone || DEFAULT_BUSINESS_TIMEZONE);
+  const dayKey = getDateKey(businessToday);
+  const holidayDates = parseHolidayDateSet(settings.defaultDailyLimitHolidayDates);
+
+  if (!settings.defaultDailyLimitUseWeeklyRules) {
+    return Number(settings.defaultDailyLimitKwh ?? 10);
+  }
+
+  if (holidayDates.has(dayKey)) {
+    return Number(settings.defaultDailyLimitHolidayKwh ?? settings.defaultDailyLimitKwh ?? 10);
+  }
+
+  const weekday = businessToday.getDay();
+  if (weekday === 0) {
+    return Number(settings.defaultDailyLimitSundayKwh ?? settings.defaultDailyLimitKwh ?? 10);
+  }
+  if (weekday === 6) {
+    return Number(settings.defaultDailyLimitSaturdayKwh ?? settings.defaultDailyLimitKwh ?? 10);
+  }
+  return Number(settings.defaultDailyLimitWeekdayKwh ?? settings.defaultDailyLimitKwh ?? 10);
+}
+
 function getRoomAnnotation(room: {
   roomNumber: string;
   name?: string | null;
@@ -207,24 +437,150 @@ function getRoomDisplayName(room: {
   return formatRoomDisplayName(room.roomNumber, room.name);
 }
 
+async function syncRoomOfflineLifecycle(
+  room: {
+    id: string;
+    roomNumber: string;
+    name?: string | null;
+    cutoff: boolean;
+    devices?: Array<{
+      name?: string | null;
+      status: any;
+    }>;
+  },
+  realtime: RealtimeEnergyData,
+): Promise<void> {
+  if (!room.devices || room.devices.length === 0 || room.cutoff) {
+    return;
+  }
+
+  const unresolvedOfflineAlarms = await prisma.alarmLog.findMany({
+    where: {
+      roomId: room.id,
+      type: AlarmType.device_offline,
+      resolved: false,
+    },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  const offlineDeviceCount = room.devices.filter((device) => device.status !== 'online').length;
+  const roomLabel = getRoomDisplayName(room);
+  const now = new Date();
+
+  if (!realtime.deviceOnline) {
+    if (unresolvedOfflineAlarms.length > 0) {
+      return;
+    }
+
+    const createdAlarm = await prisma.alarmLog.create({
+      data: {
+        type: AlarmType.device_offline,
+        level: AlarmLevel.danger,
+        roomId: room.id,
+        message: `${roomLabel}出现网络或供电异常`,
+        resolved: false,
+      },
+    });
+    broadcastAlarm(createdAlarm);
+
+    await writeOperation(
+      null,
+      OperationType.update_alarm,
+      room.id,
+      {
+        action: 'room_offline_detected',
+        actionLabel: '记录离线异常',
+        source: 'system_auto',
+        sourceLabel: '系统自动',
+        roomNumber: room.roomNumber,
+        roomName: room.name,
+        displayName: roomLabel,
+        startedAt: now.toISOString(),
+        note: `检测到${roomLabel}出现网络或供电异常，当前离线设备 ${offlineDeviceCount} 台`,
+        resultLabel: '记录',
+      },
+      true,
+    );
+    return;
+  }
+
+  if (unresolvedOfflineAlarms.length === 0) {
+    return;
+  }
+
+  await prisma.alarmLog.updateMany({
+    where: {
+      roomId: room.id,
+      type: AlarmType.device_offline,
+      resolved: false,
+    },
+    data: {
+      resolved: true,
+      resolvedAt: now,
+    },
+  });
+
+  const startedAt = unresolvedOfflineAlarms[0]?.createdAt ?? now;
+  const durationMinutes = Math.max(
+    1,
+    Math.round((now.getTime() - startedAt.getTime()) / 60000),
+  );
+
+  await writeOperation(
+    null,
+    OperationType.update_alarm,
+    room.id,
+    {
+      action: 'room_offline_recovered',
+      actionLabel: '记录离线恢复',
+      source: 'system_auto',
+      sourceLabel: '系统自动',
+      roomNumber: room.roomNumber,
+      roomName: room.name,
+      displayName: roomLabel,
+      startedAt: startedAt.toISOString(),
+      recoveredAt: now.toISOString(),
+      durationMinutes,
+      note: `${roomLabel}网络或供电异常已恢复`,
+      resultLabel: '恢复',
+    },
+    true,
+  );
+}
+
 export async function computeRoomRealtime(room: {
   id: string;
+  siteId: string;
+  site?: { name: string } | null;
   roomNumber: string;
   name?: string | null;
+  floor?: number | null;
   cutoff: boolean;
   status?: any;
-  energyLimit?: { dailyLimit: number; enabled?: boolean } | null;
+  energyLimit?: {
+    dailyLimit: number;
+    enabled?: boolean;
+    monthlyCostLimit?: number;
+    costEnabled?: boolean;
+  } | null;
   devices?: Array<{
     name?: string | null;
+      siteId?: string;
+      site?: { name: string } | null;
     status: any;
     powerW?: number | null;
     currentA?: number | null;
     voltageV?: number | null;
   }>;
-}, businessTimeZone?: string): Promise<RealtimeEnergyData> {
-  const timeZone =
-    businessTimeZone ??
-    await systemService.getSetting('businessTimezone', DEFAULT_BUSINESS_TIMEZONE);
+}, businessTimeZone?: string, defaultDailyLimit = 10, forceDefaultDailyLimit = false, defaultMonthlyCostLimit?: number): Promise<RealtimeEnergyData> {
+  const [timeZone, resolvedDefaultMonthlyCostLimit] = await Promise.all([
+    businessTimeZone
+      ? Promise.resolve(businessTimeZone)
+      : systemService.getSetting('businessTimezone', DEFAULT_BUSINESS_TIMEZONE),
+    defaultMonthlyCostLimit != null
+      ? Promise.resolve(defaultMonthlyCostLimit)
+      : systemService.getSetting('defaultMonthlyCostLimitEur', 200),
+  ]);
   const today = getBusinessDate(new Date(), timeZone);
   const yesterday = addDays(today, -1);
   const tomorrow = addDays(today, 1);
@@ -236,7 +592,7 @@ export async function computeRoomRealtime(room: {
     prisma.dailyEnergy.findUnique({ where: { roomId_date: { roomId: room.id, date: yesterday } } }),
     prisma.dailyEnergy.aggregate({
       where: { roomId: room.id, date: { gte: monthStart, lt: tomorrow } },
-      _sum: { usageKwh: true },
+      _sum: { usageKwh: true, cost: true },
     }),
     prisma.dailyEnergy.aggregate({
       where: { roomId: room.id, date: { gte: yearStart, lt: tomorrow } },
@@ -248,15 +604,61 @@ export async function computeRoomRealtime(room: {
   const todayUsage = todayRecord?.usageKwh ?? 0;
   const yesterdayUsage = yesterdayRecord?.usageKwh ?? 0;
   const monthUsage = monthAgg._sum.usageKwh ?? 0;
+  const monthCost = monthAgg._sum.cost ?? 0;
   const yearUsage = yearAgg._sum.usageKwh ?? 0;
 
-  const dailyLimit = room.energyLimit?.dailyLimit ?? 10;
+  const dailyLimit = forceDefaultDailyLimit
+    ? defaultDailyLimit
+    : (room.energyLimit?.dailyLimit ?? defaultDailyLimit);
   const limitEnabled = room.energyLimit?.enabled ?? false;
+  const monthlyCostLimit =
+    room.energyLimit?.monthlyCostLimit != null && room.energyLimit.monthlyCostLimit > 0
+      ? room.energyLimit.monthlyCostLimit
+      : resolvedDefaultMonthlyCostLimit;
+  const costLimitEnabled = room.energyLimit?.costEnabled ?? false;
   const usagePercent = dailyLimit > 0 ? Math.min(100, (todayUsage / dailyLimit) * 100) : 0;
 
   let devices = room.devices as any;
   if (!devices) {
-    devices = await prisma.device.findMany({ where: { roomId: room.id }, include: { room: { select: { roomNumber: true } } } });
+    devices = await prisma.device.findMany({
+      where: { roomId: room.id },
+      include: {
+        room: { select: { roomNumber: true } },
+        site: { select: { name: true } },
+      },
+    });
+  }
+  const nowTs = Date.now();
+  for (const d of devices as Array<any>) {
+    const model = tryParseJsonModel(d.model);
+    const category = inferDeviceCategory({ name: d.name, model: d.model });
+    const ownership = model && typeof model.ownership === 'string' ? model.ownership : '';
+    const source = model && typeof model.source === 'string' ? model.source : '';
+    const scope = (model && (model as any).sourceScope === 'camera') ? 'camera' : 'main';
+    const isXiaomi = ownership === 'xiaomi' || source === 'account_sync';
+    const isLanDiscovered = !!d.did?.startsWith?.('LAN_') || source === 'lan_discovery';
+    const lastSyncTs = d.lastSyncAt ? new Date(d.lastSyncAt).getTime() : 0;
+    const stale = lastSyncTs > 0 && (nowTs - lastSyncTs) > XIAOMI_STALE_OFFLINE_THRESHOLD_MS;
+    let forceOffline = false;
+    if (category === shared_types.DeviceCategory.CAMERA) {
+      if (!isLanDiscovered && (!lastSyncTs || stale)) forceOffline = true;
+    }
+    if (isXiaomi && !forceOffline) {
+      const loggedIn = await xiaomiAdapter.isLoggedIn(scope).catch(() => false);
+      if (!loggedIn) forceOffline = true;
+    }
+    if (forceOffline && d.status !== 'offline') {
+      d.status = 'offline';
+    }
+    // #region debug-point B:energy-camera-status
+    if (category === shared_types.DeviceCategory.CAMERA) {
+      try {
+        const fs=require('fs'); let u='http://127.0.0.1:7778/event', s='camera-status-sync';
+        try { const e=fs.readFileSync('.dbg/camera-status-sync.env','utf8'); u=e.match(/DEBUG_SERVER_URL=(.+)/)?.[1]||u; s=e.match(/DEBUG_SESSION_ID=(.+)/)?.[1]||s; } catch {}
+        fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:s,runId:'pre-fix',hypothesisId:'B',location:'energy.service.ts:computeRoomRealtime',msg:'[DEBUG] energy camera status evaluated',data:{roomId:room.id,roomNumber:room.roomNumber,did:d.did,name:d.name,dbStatus:d.status,lastSyncAt:d.lastSyncAt?new Date(d.lastSyncAt).toISOString():null,scope,isXiaomi,stale,forceOffline}})}).catch(()=>{});
+      } catch {}
+    }
+    // #endregion
   }
   const onlineDevices = devices.filter((d: any) => d.status === 'online');
   const deviceOnline = onlineDevices.length > 0 || devices.length === 0;
@@ -291,8 +693,11 @@ export async function computeRoomRealtime(room: {
 
   return {
     roomId: room.id,
+    siteId: room.siteId,
+    siteName: room.site?.name ?? '默认区域',
     roomNumber: room.roomNumber,
     displayName,
+    floor: room.floor ?? 1,
     roomAnnotation,
     power,
     current,
@@ -300,11 +705,14 @@ export async function computeRoomRealtime(room: {
     todayUsage,
     yesterdayUsage,
     monthUsage,
+    monthCost,
     yearUsage,
     status,
     usagePercent,
     dailyLimit,
     limitEnabled,
+    monthlyCostLimit,
+    costLimitEnabled,
     deviceOnline,
     cutoff: room.cutoff,
     powerActionCooldownUntil: powerActionCooldown.powerActionCooldownUntil,
@@ -314,43 +722,58 @@ export async function computeRoomRealtime(room: {
   };
 }
 
-export async function getRooms(): Promise<RealtimeEnergyData[]> {
+export async function getRooms(siteId?: string): Promise<RealtimeEnergyData[]> {
   await xiaomiAdapter.ensureRealtimeFresh();
   await xiaomiAdapter.ensureDailyHistoryFresh();
-  const businessTimeZone = await systemService.getSetting(
-    'businessTimezone',
-    DEFAULT_BUSINESS_TIMEZONE,
-  );
+  const settings = await systemService.getSettings();
+  const businessTimeZone = settings.businessTimezone ?? DEFAULT_BUSINESS_TIMEZONE;
+  const defaultDailyLimit = resolveSystemDailyLimit(settings);
+  const defaultMonthlyCostLimit = Number(settings.defaultMonthlyCostLimitEur ?? 200);
+  const forceDefaultDailyLimit = !!settings.defaultDailyLimitUseWeeklyRules;
 
   const rooms = await prisma.room.findMany({
+    where: siteId ? { siteId } : undefined,
     include: {
+      site: { select: { name: true } },
       energyLimit: true,
-      devices: { include: { room: { select: { roomNumber: true } } } },
+      devices: {
+        include: {
+          room: { select: { roomNumber: true } },
+          site: { select: { name: true } },
+        },
+      },
     },
   });
-  return Promise.all(rooms.map((r) => computeRoomRealtime(r, businessTimeZone)));
+  return Promise.all(rooms.map((r) => computeRoomRealtime(r, businessTimeZone, defaultDailyLimit, forceDefaultDailyLimit, defaultMonthlyCostLimit)));
 }
 
 export async function getRoomDetail(roomId: string): Promise<RoomEnergyDetail> {
   await xiaomiAdapter.ensureRealtimeFresh();
   await xiaomiAdapter.ensureDailyHistoryFresh();
-  const businessTimeZone = await systemService.getSetting(
-    'businessTimezone',
-    DEFAULT_BUSINESS_TIMEZONE,
-  );
+  const settings = await systemService.getSettings();
+  const businessTimeZone = settings.businessTimezone ?? DEFAULT_BUSINESS_TIMEZONE;
+  const defaultDailyLimit = resolveSystemDailyLimit(settings);
+  const defaultMonthlyCostLimit = Number(settings.defaultMonthlyCostLimitEur ?? 200);
+  const forceDefaultDailyLimit = !!settings.defaultDailyLimitUseWeeklyRules;
 
   const room = await prisma.room.findUnique({
     where: { id: roomId },
     include: {
+      site: { select: { name: true } },
       energyLimit: true,
-      devices: { include: { room: { select: { roomNumber: true } } } },
+      devices: {
+        include: {
+          room: { select: { roomNumber: true } },
+          site: { select: { name: true } },
+        },
+      },
     },
   });
   if (!room) {
     throw new AppError(404, 'ROOM_NOT_FOUND', '房间不存在');
   }
 
-  const realtime = await computeRoomRealtime(room, businessTimeZone);
+  const realtime = await computeRoomRealtime(room, businessTimeZone, defaultDailyLimit, forceDefaultDailyLimit, defaultMonthlyCostLimit);
   const devices = room.devices.map(toDeviceItem);
 
   const today = getBusinessDate(new Date(), businessTimeZone);
@@ -418,6 +841,8 @@ export async function updateEnergyLimit(
   dailyLimit: number,
   operatorUserId: string,
   enabled?: boolean,
+  monthlyCostLimit?: number,
+  costEnabled?: boolean,
   actorContext?: OperationActorContext,
 ) {
   const room = await prisma.room.findUnique({ where: { id: roomId } });
@@ -427,17 +852,24 @@ export async function updateEnergyLimit(
   if (dailyLimit < 0) {
     throw new AppError(400, 'INVALID_LIMIT', '限额值无效');
   }
+  if (monthlyCostLimit != null && monthlyCostLimit < 0) {
+    throw new AppError(400, 'INVALID_COST_LIMIT', '费用限额无效');
+  }
 
   const limit = await prisma.energyLimit.upsert({
     where: { roomId },
     update: {
       dailyLimit,
       ...(typeof enabled === 'boolean' ? { enabled } : {}),
+      ...(typeof monthlyCostLimit === 'number' ? { monthlyCostLimit } : {}),
+      ...(typeof costEnabled === 'boolean' ? { costEnabled } : {}),
     },
     create: {
       roomId,
       dailyLimit,
       enabled: typeof enabled === 'boolean' ? enabled : false,
+      monthlyCostLimit: typeof monthlyCostLimit === 'number' ? monthlyCostLimit : 0,
+      costEnabled: typeof costEnabled === 'boolean' ? costEnabled : false,
     },
   });
 
@@ -447,7 +879,7 @@ export async function updateEnergyLimit(
     roomId,
     {
       action: 'update_limit',
-      actionLabel: '修改日限额',
+      actionLabel: '修改限额',
       source: actorContext?.source,
       sourceLabel: actorContext?.sourceLabel,
       roomNumber: room.roomNumber,
@@ -455,6 +887,8 @@ export async function updateEnergyLimit(
       displayName: getRoomDisplayName(room),
       dailyLimit,
       limitEnabled: limit.enabled,
+      monthlyCostLimit: limit.monthlyCostLimit,
+      costLimitEnabled: limit.costEnabled,
       note: '更新成功',
     },
     true,
@@ -463,8 +897,11 @@ export async function updateEnergyLimit(
   return limit;
 }
 
-export async function getEnergyLimits() {
+export async function getEnergyLimits(siteId?: string) {
+  const settings = await systemService.getSettings();
+  const effectiveDefaultDailyLimit = resolveSystemDailyLimit(settings);
   const items = await prisma.energyLimit.findMany({
+    where: siteId ? { room: { siteId } } : undefined,
     include: {
       room: {
         include: {
@@ -480,6 +917,10 @@ export async function getEnergyLimits() {
 
   return items.map((item) => ({
     ...item,
+    dailyLimit:
+      settings.defaultDailyLimitUseWeeklyRules
+        ? effectiveDefaultDailyLimit
+        : item.dailyLimit,
     displayName: getRoomDisplayName(item.room),
     roomAnnotation: getRoomAnnotation(item.room),
   }));
@@ -489,8 +930,11 @@ export async function bulkUpdateLimitEnabled(
   enabled: boolean,
   operatorUserId: string,
   actorContext?: OperationActorContext,
+  siteId?: string,
 ): Promise<{ ok: boolean; enabled: boolean; total: number }> {
+  const defaultDailyLimit = await systemService.getSetting('defaultDailyLimitKwh', 10);
   const rooms = await prisma.room.findMany({
+    where: siteId ? { siteId } : undefined,
     select: {
       id: true,
       energyLimit: {
@@ -505,7 +949,7 @@ export async function bulkUpdateLimitEnabled(
       update: { enabled },
       create: {
         roomId: room.id,
-        dailyLimit: room.energyLimit?.dailyLimit ?? 10,
+        dailyLimit: room.energyLimit?.dailyLimit ?? defaultDailyLimit,
         enabled,
       },
     });
@@ -535,6 +979,62 @@ export async function bulkUpdateLimitEnabled(
   };
 }
 
+export async function bulkUpdateDailyLimit(
+  dailyLimit: number,
+  operatorUserId: string,
+  actorContext?: OperationActorContext,
+  siteId?: string,
+): Promise<{ ok: boolean; dailyLimit: number; total: number }> {
+  if (dailyLimit < 0) {
+    throw new AppError(400, 'INVALID_LIMIT', '限额值无效');
+  }
+
+  const rooms = await prisma.room.findMany({
+    where: siteId ? { siteId } : undefined,
+    select: {
+      id: true,
+      energyLimit: {
+        select: { enabled: true },
+      },
+    },
+  });
+
+  for (const room of rooms) {
+    await prisma.energyLimit.upsert({
+      where: { roomId: room.id },
+      update: { dailyLimit },
+      create: {
+        roomId: room.id,
+        dailyLimit,
+        enabled: room.energyLimit?.enabled ?? false,
+      },
+    });
+  }
+
+  await writeOperation(
+    operatorUserId,
+    OperationType.update_limit,
+    null,
+    {
+      action: 'bulk_update_limit',
+      actionLabel: '批量修改日限额',
+      source: actorContext?.source,
+      sourceLabel: actorContext?.sourceLabel,
+      dailyLimit,
+      totalCount: rooms.length,
+    },
+    true,
+  );
+
+  await broadcastDashboard().catch(() => {});
+
+  return {
+    ok: true,
+    dailyLimit,
+    total: rooms.length,
+  };
+}
+
 export async function checkAndTriggerAlarms(roomId: string): Promise<RoomStatus> {
   const room = await prisma.room.findUnique({
     where: { id: roomId },
@@ -545,6 +1045,7 @@ export async function checkAndTriggerAlarms(roomId: string): Promise<RoomStatus>
   }
 
   const realtime = await computeRoomRealtime(room);
+  await syncRoomOfflineLifecycle(room, realtime);
 
   const [alarmRatio80, alarmRatio90, alarmRatio95] = await Promise.all([
     systemService.getSetting('alarmRatio80', 0.8),
@@ -610,7 +1111,7 @@ export async function checkAndTriggerAlarms(roomId: string): Promise<RoomStatus>
         },
       });
       if (!existing) {
-        await prisma.alarmLog.create({
+        const createdAlarm = await prisma.alarmLog.create({
           data: {
             type: alarm.type,
             level: alarm.level,
@@ -619,6 +1120,7 @@ export async function checkAndTriggerAlarms(roomId: string): Promise<RoomStatus>
             resolved: false,
           },
         });
+        broadcastAlarm(createdAlarm);
       }
       continue;
     }
@@ -669,10 +1171,12 @@ export async function cutoffPower(
 
   const roomDisplayName = getRoomDisplayName(room);
   const realtimeBeforeAction = await computeRoomRealtime(room);
+  const autoCutoffReason = auto ? resolveAutoCutoffReason(realtimeBeforeAction) : null;
 
   if (
     auto &&
-    !realtimeBeforeAction.limitEnabled
+    !realtimeBeforeAction.limitEnabled &&
+    !realtimeBeforeAction.costLimitEnabled
   ) {
     await writeOperation(
       operatorUserId ?? null,
@@ -687,7 +1191,9 @@ export async function cutoffPower(
         roomName: room.name,
         displayName: roomDisplayName,
         limitEnabled: false,
-        note: '限额断电开关已关闭，不执行自动断电',
+        costLimitEnabled: false,
+        resultLabel: '跳过',
+        note: '日限额断电和费用断电都已关闭，不执行自动断电',
       },
       true,
     );
@@ -696,7 +1202,7 @@ export async function cutoffPower(
 
   if (
     auto &&
-    !isRoomOverDailyLimit(realtimeBeforeAction.todayUsage, realtimeBeforeAction.dailyLimit)
+    !autoCutoffReason
   ) {
     await writeOperation(
       operatorUserId ?? null,
@@ -711,7 +1217,9 @@ export async function cutoffPower(
         roomName: room.name,
         displayName: roomDisplayName,
         dailyLimit: realtimeBeforeAction.dailyLimit,
-        note: `当前用电 ${realtimeBeforeAction.todayUsage.toFixed(3)} kWh，未超出限额，不执行自动断电`,
+        monthlyCostLimit: realtimeBeforeAction.monthlyCostLimit,
+        resultLabel: '跳过',
+        note: `当前用电 ${realtimeBeforeAction.todayUsage.toFixed(3)} kWh，本月费用 ${realtimeBeforeAction.monthCost.toFixed(2)} EUR，未超出已启用限额，不执行自动断电`,
       },
       true,
     );
@@ -794,7 +1302,9 @@ export async function cutoffPower(
       roomNumber: room.roomNumber,
       roomName: room.name,
       displayName: roomDisplayName,
-      note: '执行成功',
+      dailyLimit: autoCutoffReason?.type === 'daily' ? realtimeBeforeAction.dailyLimit : undefined,
+      monthlyCostLimit: autoCutoffReason?.type === 'cost' ? realtimeBeforeAction.monthlyCostLimit : undefined,
+      note: autoCutoffReason?.note ?? '执行成功',
     },
     true,
   );
@@ -813,22 +1323,27 @@ export async function cutoffPower(
 
   if (
     !room.cutoff &&
-    realtimeBeforeAction.limitEnabled &&
-    isRoomOverDailyLimit(realtimeBeforeAction.todayUsage, realtimeBeforeAction.dailyLimit)
+    autoCutoffReason
   ) {
-    await prisma.alarmLog.create({
+    const createdAlarm = await prisma.alarmLog.create({
       data: {
         type: AlarmType.limit_reached,
         level: AlarmLevel.critical,
         roomId,
         message: auto
-          ? `${roomDisplayName}已超出日限额，系统已自动断电`
-          : `${roomDisplayName}已超出日限额，已执行手动断电`,
+          ? `${roomDisplayName}${autoCutoffReason.alarmMessage}`
+          : `${roomDisplayName}${autoCutoffReason.type === 'cost' ? '已超出本月费用限额，已执行手动断电' : '已超出日限额，已执行手动断电'}`,
         resolved: true,
         resolvedAt: new Date(),
       },
     });
+    broadcastAlarm(createdAlarm);
   }
+
+  await Promise.allSettled([
+    broadcastDashboard(),
+    broadcastRoom(roomId),
+  ]);
 
   return updatedRoom;
 }
@@ -857,8 +1372,9 @@ export async function restorePower(
 
   const roomDisplayName = getRoomDisplayName(room);
   const realtimeBeforeAction = await computeRoomRealtime(room);
+  const autoCutoffReason = auto ? resolveAutoCutoffReason(realtimeBeforeAction) : null;
 
-  if (auto && !realtimeBeforeAction.limitEnabled) {
+  if (auto && !realtimeBeforeAction.limitEnabled && !realtimeBeforeAction.costLimitEnabled) {
     await writeOperation(
       operatorUserId,
       OperationType.restore_power,
@@ -872,7 +1388,34 @@ export async function restorePower(
         roomName: room.name,
         displayName: roomDisplayName,
         limitEnabled: false,
-        note: '限额断电开关已关闭，不执行自动恢复供电',
+        costLimitEnabled: false,
+        resultLabel: '跳过',
+        note: '日限额断电和费用断电都已关闭，不执行自动恢复供电',
+      },
+      true,
+    );
+    return room;
+  }
+
+  if (auto && autoCutoffReason) {
+    await writeOperation(
+      operatorUserId,
+      OperationType.restore_power,
+      roomId,
+      {
+        action: 'auto_restore_skipped',
+        actionLabel: '自动恢复供电跳过',
+        source: 'system_auto',
+        sourceLabel: '系统自动',
+        roomNumber: room.roomNumber,
+        roomName: room.name,
+        displayName: roomDisplayName,
+        dailyLimit: realtimeBeforeAction.dailyLimit,
+        monthlyCostLimit: realtimeBeforeAction.monthlyCostLimit,
+        resultLabel: '跳过',
+        note: autoCutoffReason.type === 'cost'
+          ? `本月费用 ${realtimeBeforeAction.monthCost.toFixed(2)} EUR 仍超出限额 ${realtimeBeforeAction.monthlyCostLimit.toFixed(2)} EUR，暂不自动恢复`
+          : `今日用电 ${realtimeBeforeAction.todayUsage.toFixed(3)} kWh 仍超出日限额 ${realtimeBeforeAction.dailyLimit.toFixed(3)} kWh，暂不自动恢复`,
       },
       true,
     );
@@ -900,7 +1443,7 @@ export async function restorePower(
     throw new AppError(400, 'NO_CONTROLLABLE_DEVICES', '没有可控制的设备，无法恢复供电');
   }
 
-  const failedDevices: string[] = [];
+  let failedDevices: string[] = [];
   for (const device of controllableDevices) {
     try {
       await xiaomiAdapter.turnOn(device.did, operatorUserId ?? undefined, {
@@ -911,6 +1454,24 @@ export async function restorePower(
     } catch {
       failedDevices.push(device.did);
     }
+  }
+
+  if (failedDevices.length > 0) {
+    await xiaomiAdapter.refreshAllRoomsRealtime().catch(() => {});
+
+    const refreshedDevices = await prisma.device.findMany({
+      where: { did: { in: failedDevices } },
+      select: {
+        did: true,
+        power: true,
+      },
+    });
+
+    const refreshedPowerMap = new Map(
+      refreshedDevices.map((device) => [device.did, device.power === true]),
+    );
+
+    failedDevices = failedDevices.filter((did) => !refreshedPowerMap.get(did));
   }
 
   if (failedDevices.length > 0) {
@@ -987,10 +1548,18 @@ export async function restorePower(
     },
   });
 
+  await Promise.allSettled([
+    broadcastDashboard(),
+    broadcastRoom(roomId),
+  ]);
+
   return { ...updatedRoom, status: realtime.status };
 }
 
-export async function getMonthlyRanking(limit: number = 14): Promise<RankingItem[]> {
+export async function getMonthlyRanking(
+  limit: number = 14,
+  siteId?: string,
+): Promise<RankingItem[]> {
   const businessTimeZone = await systemService.getSetting(
     'businessTimezone',
     DEFAULT_BUSINESS_TIMEZONE,
@@ -1000,7 +1569,11 @@ export async function getMonthlyRanking(limit: number = 14): Promise<RankingItem
   const month = today.getMonth() + 1;
 
   const monthRecords = await prisma.monthlyEnergy.findMany({
-    where: { year, month },
+    where: {
+      year,
+      month,
+      ...(siteId ? { room: { siteId } } : {}),
+    },
     include: {
       room: {
         include: {
@@ -1028,7 +1601,10 @@ export async function getMonthlyRanking(limit: number = 14): Promise<RankingItem
   if (roomRecords.length < limit) {
     const existingIds = new Set(roomRecords.map(r => r.roomId));
     const otherRooms = await prisma.room.findMany({
-      where: { id: { notIn: Array.from(existingIds) } },
+      where: {
+        id: { notIn: Array.from(existingIds) },
+        ...(siteId ? { siteId } : {}),
+      },
       include: {
         devices: {
           select: { name: true },

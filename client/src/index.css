@@ -2,6 +2,32 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer components {
+  .app-page {
+    @apply w-full;
+  }
+
+  .app-page-stack {
+    @apply space-y-3;
+  }
+
+  .app-page-header {
+    @apply flex flex-wrap items-center justify-between gap-2.5;
+  }
+
+  .app-page-header-title {
+    @apply flex items-center gap-2.5 min-w-0;
+  }
+
+  .app-page-toolbar {
+    @apply flex flex-wrap items-center gap-2;
+  }
+
+  .app-card-grid-tight {
+    @apply grid gap-2.5;
+  }
+}
+
 @layer base {
   :root {
     --background: 0 0% 100%;

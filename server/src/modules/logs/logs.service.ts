@@ -8,8 +8,12 @@ import { writeOperation, resolveAlarm as resolveAlarmLog } from '../../lib/logge
 import {
   formatOperationDetailsText,
   getOperationActorLabel,
+  getOperationCategory,
+  getOperationCategoryLabel,
+  getOperationSourceLabel,
   getOperationTargetInfo,
   OperationActorContext,
+  parseOperationDetails,
 } from '../../lib/operation-log';
 import { formatRoomDisplayName } from '../../lib/room-display';
 
@@ -19,7 +23,9 @@ interface PaginationParams {
 }
 
 interface OperationLogQuery extends PaginationParams {
+  siteId?: string;
   type?: OperationType;
+  category?: string;
   userId?: string;
   roomId?: string;
   roomNumber?: string;
@@ -29,6 +35,7 @@ interface OperationLogQuery extends PaginationParams {
 }
 
 interface AlarmLogQuery extends PaginationParams {
+  siteId?: string;
   type?: AlarmType;
   level?: AlarmLevel;
   roomNumber?: string;
@@ -44,11 +51,44 @@ interface PaginatedResult<T> {
   pageSize: number;
 }
 
+function getOperationResultMeta(
+  success: boolean,
+  rawDetails: string,
+): { label: string; tone: 'success' | 'failure' | 'warning' } {
+  const parsed = parseOperationDetails(rawDetails);
+  if (typeof parsed !== 'string') {
+    if (typeof parsed.resultLabel === 'string' && parsed.resultLabel.trim()) {
+      return {
+        label: parsed.resultLabel.trim(),
+        tone:
+          parsed.resultLabel.includes('跳过') || parsed.resultLabel.includes('拦截')
+            ? 'warning'
+            : success
+              ? 'success'
+              : 'failure',
+      };
+    }
+
+    if (parsed.blocked) {
+      return { label: '拦截', tone: 'warning' };
+    }
+
+    if (typeof parsed.action === 'string' && parsed.action.includes('skipped')) {
+      return { label: '跳过', tone: 'warning' };
+    }
+  }
+
+  return {
+    label: success ? '成功' : '失败',
+    tone: success ? 'success' : 'failure',
+  };
+}
+
 class LogsService {
   public async getOperationLogs(
     params: OperationLogQuery,
   ): Promise<PaginatedResult<OperationLogResponse>> {
-    const { page, pageSize, type, userId, roomId, roomNumber, keyword, startDate, endDate } = params;
+    const { page, pageSize, siteId, type, category, userId, roomId, roomNumber, keyword, startDate, endDate } = params;
     const skip = (page - 1) * pageSize;
 
     const where: Record<string, unknown> = {};
@@ -65,7 +105,13 @@ class LogsService {
     if (roomNumber) {
       where.room = {
         roomNumber,
+        ...(siteId ? { siteId } : {}),
       };
+    } else if (siteId) {
+      where.OR = [
+        { room: { siteId } },
+        { roomId: null },
+      ];
     }
     if (keyword) {
       where.details = {
@@ -82,45 +128,46 @@ class LogsService {
       }
     }
 
-    const [logs, total] = await Promise.all([
-      prisma.operationLog.findMany({
-        where,
-        skip,
-        take: pageSize,
-        orderBy: { createdAt: 'desc' },
-        include: {
-          user: {
-            select: { username: true },
-          },
-          room: {
-            select: {
-              roomNumber: true,
-              name: true,
-              devices: {
-                select: { name: true },
-                orderBy: { createdAt: 'asc' },
-                take: 1,
-              },
-            },
+    const include = {
+      user: {
+        select: { username: true },
+      },
+      room: {
+        select: {
+          roomNumber: true,
+          name: true,
+          devices: {
+            select: { name: true },
+            orderBy: { createdAt: 'asc' },
+            take: 1,
           },
         },
-      }),
-      prisma.operationLog.count({ where }),
-    ]);
+      },
+    } as const;
 
-    const items: OperationLogResponse[] = logs.map((log) => {
+    const mapLog = (log: any): OperationLogResponse => {
       const targetInfo = getOperationTargetInfo(log.details);
       const detailsText = formatOperationDetailsText(log.type, log.details);
+      const resultMeta = getOperationResultMeta(log.success, log.details);
+      const parsedDetails = parseOperationDetails(log.details);
+      const sourceLabel =
+        typeof parsedDetails === 'string'
+          ? null
+          : (parsedDetails.sourceLabel || getOperationSourceLabel(parsedDetails.source));
+      const resolvedCategory = getOperationCategory(log.type, log.details);
       const detailsWithResult = detailsText
-        ? `${detailsText}\n结果：${log.success ? '成功' : '失败'}`
-        : `结果：${log.success ? '成功' : '失败'}`;
+        ? `${detailsText}\n结果：${resultMeta.label}`
+        : `结果：${resultMeta.label}`;
 
       return {
         id: log.id,
         type: log.type as unknown as OperationLogResponse['type'],
+        category: resolvedCategory,
+        categoryLabel: getOperationCategoryLabel(resolvedCategory),
         userId: log.userId,
         username: log.user?.username ?? null,
         actorLabel: getOperationActorLabel(log.user?.username ?? null, log.details),
+        sourceLabel,
         roomId: log.roomId,
         roomNumber: log.room?.roomNumber ?? targetInfo.roomNumber,
         displayName:
@@ -134,9 +181,40 @@ class LogsService {
         details: log.details,
         detailsText: detailsWithResult,
         success: log.success,
+        resultLabel: resultMeta.label,
+        resultTone: resultMeta.tone,
         createdAt: log.createdAt.toISOString(),
       };
-    });
+    };
+
+    if (category) {
+      const allLogs = await prisma.operationLog.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        include,
+      });
+      const mapped = allLogs.map(mapLog).filter((item) => item.category === category);
+      const items = mapped.slice(skip, skip + pageSize);
+      return {
+        items,
+        total: mapped.length,
+        page,
+        pageSize,
+      };
+    }
+
+    const [logs, total] = await Promise.all([
+      prisma.operationLog.findMany({
+        where,
+        skip,
+        take: pageSize,
+        orderBy: { createdAt: 'desc' },
+        include,
+      }),
+      prisma.operationLog.count({ where }),
+    ]);
+
+    const items: OperationLogResponse[] = logs.map(mapLog);
 
     return {
       items,
@@ -149,7 +227,7 @@ class LogsService {
   public async getAlarmLogs(
     params: AlarmLogQuery,
   ): Promise<PaginatedResult<AlarmLogResponse>> {
-    const { page, pageSize, type, level, roomNumber, resolved, startDate, endDate } = params;
+    const { page, pageSize, siteId, type, level, roomNumber, resolved, startDate, endDate } = params;
     const skip = (page - 1) * pageSize;
 
     const where: Record<string, unknown> = {};
@@ -163,7 +241,10 @@ class LogsService {
     if (roomNumber) {
       where.room = {
         roomNumber,
+        ...(siteId ? { siteId } : {}),
       };
+    } else if (siteId) {
+      where.room = { siteId };
     }
     if (resolved !== undefined) {
       where.resolved = resolved;
@@ -230,7 +311,7 @@ class LogsService {
     operatorUserId: string | null,
     actorContext?: OperationActorContext,
   ): Promise<{ deletedCount: number }> {
-    const { type, level, roomNumber, resolved, startDate, endDate } = params;
+    const { siteId, type, level, roomNumber, resolved, startDate, endDate } = params;
 
     const where: Record<string, unknown> = {};
 
@@ -243,7 +324,10 @@ class LogsService {
     if (roomNumber) {
       where.room = {
         roomNumber,
+        ...(siteId ? { siteId } : {}),
       };
+    } else if (siteId) {
+      where.room = { siteId };
     }
     if (resolved !== undefined) {
       where.resolved = resolved;
@@ -273,6 +357,7 @@ class LogsService {
         filters: {
           type: type ?? null,
           level: level ?? null,
+          siteId: siteId ?? null,
           roomNumber: roomNumber ?? null,
           resolved: resolved ?? null,
           startDate: startDate ?? null,

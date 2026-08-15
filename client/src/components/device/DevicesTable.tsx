@@ -11,7 +11,7 @@ import {
   TableRow,
 } from '../ui/table';
 import { toast } from 'sonner';
-import { Cpu, Pencil, Power, PowerOff } from 'lucide-react';
+import { Cpu, Pencil } from 'lucide-react';
 import * as api from '@/lib/api';
 import { useAuthStore } from '@/store/auth';
 import { UserRole, DeviceStatus as DS } from '@/types';
@@ -29,6 +29,35 @@ const statusText: Record<DeviceStatus, string> = {
   [DS.OFFLINE]: '离线',
   [DS.UNKNOWN]: '未知',
 };
+
+const OWNERSHIP_LABEL: Record<NonNullable<DeviceItem['ownership']>, string> = {
+  xiaomi: '米家',
+  tuya: '涂鸦',
+  huawei: '华为云',
+  baidu: '百度云',
+  tencent: '腾讯云',
+  aliyun: '阿里云',
+  custom: '自定义',
+  other: '其他',
+}
+
+const SOURCE_LABEL: Record<NonNullable<DeviceItem['source']>, string> = {
+  account_sync: '账号识别设备',
+  cloud_api: 'API同步设备',
+  custom_api: '自定义API设备',
+  lan_discovery: '本地识别设备',
+  manual: '手动录入设备',
+}
+
+function getDeviceOwnershipLabel(device: DeviceItem) {
+  if (device.ownership) return OWNERSHIP_LABEL[device.ownership] ?? '其他'
+  return '其他'
+}
+
+function getDeviceSourceLabel(device: DeviceItem) {
+  if (device.source) return SOURCE_LABEL[device.source] ?? '手动录入设备'
+  return '账号识别设备'
+}
 
 interface DevicesTableProps {
   devices: DeviceItem[];
@@ -123,7 +152,7 @@ export function DevicesTable({ devices, invalidateOnChange, compact = false }: D
       {devices.length === 0 ? (
         <div className="flex flex-col items-center justify-center py-10 text-muted-foreground text-sm gap-2">
           <Cpu className="w-8 h-8 opacity-40" />
-          <div>暂无设备数据，请到 系统设置 → 米家同步 → 立即同步米家设备</div>
+          <div>暂无设备数据，请到 系统设置 → 设备同步 → 立即执行同步</div>
         </div>
       ) : (
         <>
@@ -177,9 +206,45 @@ export function DevicesTable({ devices, invalidateOnChange, compact = false }: D
                         )}
                       </div>
                     )}
-                    <div className="mt-1 text-xs text-muted-foreground">{d.model}</div>
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                      <Badge variant={statusVariant[d.status]}>{statusText[d.status]}</Badge>
+                      <Badge variant="secondary">{getDeviceOwnershipLabel(d)}</Badge>
+                      <span>来源：{getDeviceSourceLabel(d)}</span>
+                    </div>
                   </div>
-                  <Badge variant={statusVariant[d.status]}>{statusText[d.status]}</Badge>
+                  {canControl ? (
+                    <div className="flex flex-col items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => onControl(d, 'on')}
+                        disabled={d.status !== 'online'}
+                        title="开启"
+                        className={
+                          'h-8 w-8 shrink-0 rounded-full border transition-colors ' +
+                          (d.status === 'online'
+                            ? 'border-green-600 bg-green-600 text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50'
+                            : 'border-gray-300 bg-gray-100 text-gray-400 cursor-not-allowed')
+                        }
+                      >
+                        <span className="sr-only">开启</span>
+                        <div className="mx-auto h-2 w-2 rounded-full bg-white/80" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onControl(d, 'off')}
+                        disabled={d.status !== 'online'}
+                        title="关闭"
+                        className={
+                          'h-8 w-8 shrink-0 rounded-full border transition-colors ' +
+                          (d.status === 'online'
+                            ? 'border-red-600 bg-red-600 text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50'
+                            : 'border-gray-300 bg-gray-100 text-gray-400 cursor-not-allowed')
+                        }
+                      >
+                        <span className="sr-only">关闭</span>
+                      </button>
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
@@ -192,34 +257,6 @@ export function DevicesTable({ devices, invalidateOnChange, compact = false }: D
                     <div className="mt-1 font-mono">{d.totalKwh != null ? formatEnergy(d.totalKwh) : '-'}</div>
                   </div>
                 </div>
-
-                <div className="mt-3 space-y-1 text-xs text-muted-foreground">
-                  <div className="truncate" title={d.did}>DID：{d.did}</div>
-                  <div>默认独立空间</div>
-                </div>
-
-                {canControl && (
-                  <div className="mt-3 grid grid-cols-2 gap-2">
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={d.status !== 'online'}
-                      onClick={() => onControl(d, 'on')}
-                      className="h-9 gap-1 text-xs"
-                    >
-                      <Power className="w-3.5 h-3.5 text-green-600" /> 开启
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={d.status !== 'online'}
-                      onClick={() => onControl(d, 'off')}
-                      className="h-9 gap-1 text-xs"
-                    >
-                      <PowerOff className="w-3.5 h-3.5 text-red-600" /> 关闭
-                    </Button>
-                  </div>
-                )}
               </div>
             ))}
           </div>
@@ -228,10 +265,10 @@ export function DevicesTable({ devices, invalidateOnChange, compact = false }: D
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>空间名称</TableHead>
-                  <TableHead>空间类型</TableHead>
+                  <TableHead>设备名称</TableHead>
+                  <TableHead>设备归属</TableHead>
+                  <TableHead>识别来源</TableHead>
                   <TableHead>状态</TableHead>
-                  <TableHead>型号</TableHead>
                   <TableHead>DID</TableHead>
                   <TableHead className="text-right">实时功率</TableHead>
                   <TableHead className="text-right">累计电量</TableHead>
@@ -288,39 +325,54 @@ export function DevicesTable({ devices, invalidateOnChange, compact = false }: D
                       )}
                     </TableCell>
                     <TableCell>
-                      <div className="space-y-0.5">
-                        <div>{d.name}</div>
-                        <div className="text-xs text-muted-foreground">默认独立空间</div>
-                      </div>
+                      <Badge variant="secondary">{getDeviceOwnershipLabel(d)}</Badge>
+                    </TableCell>
+                    <TableCell className="text-sm text-muted-foreground">
+                      {getDeviceSourceLabel(d)}
                     </TableCell>
                     <TableCell>
                       <Badge variant={statusVariant[d.status]}>{statusText[d.status]}</Badge>
                     </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{d.model}</TableCell>
-                    <TableCell className="font-mono text-xs text-muted-foreground max-w-[180px] truncate" title={d.did}>{d.did}</TableCell>
+                    <TableCell
+                      className="font-mono text-xs text-muted-foreground max-w-[180px] truncate"
+                      title={d.did}
+                    >
+                      {d.did}
+                    </TableCell>
                     <TableCell className="text-right font-mono">{d.powerW != null ? formatPower(d.powerW) : '-'}</TableCell>
                     <TableCell className="text-right font-mono">{d.totalKwh != null ? formatEnergy(d.totalKwh) : '-'}</TableCell>
                     {canControl && (
                       <TableCell className="text-right">
                         <div className="inline-flex gap-1.5 justify-end">
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            disabled={d.status !== 'online'}
+                          <button
+                            type="button"
                             onClick={() => onControl(d, 'on')}
-                            className="h-8 gap-1 px-2 text-xs"
-                          >
-                            <Power className="w-3.5 h-3.5 text-green-600" /> 开启
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
                             disabled={d.status !== 'online'}
-                            onClick={() => onControl(d, 'off')}
-                            className="h-8 gap-1 px-2 text-xs"
+                            title="开启"
+                            className={
+                              'h-8 w-8 shrink-0 rounded-full border transition-colors ' +
+                              (d.status === 'online'
+                                ? 'border-green-600 bg-green-600 text-white hover:bg-green-700 disabled:cursor-not-allowed disabled:opacity-50'
+                                : 'border-gray-300 bg-gray-100 text-gray-400 cursor-not-allowed')
+                            }
                           >
-                            <PowerOff className="w-3.5 h-3.5 text-red-600" /> 关闭
-                          </Button>
+                            <span className="sr-only">开启</span>
+                            <div className="mx-auto h-2 w-2 rounded-full bg-white/80" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => onControl(d, 'off')}
+                            disabled={d.status !== 'online'}
+                            title="关闭"
+                            className={
+                              'h-8 w-8 shrink-0 rounded-full border transition-colors ' +
+                              (d.status === 'online'
+                                ? 'border-red-600 bg-red-600 text-white hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50'
+                                : 'border-gray-300 bg-gray-100 text-gray-400 cursor-not-allowed')
+                            }
+                          >
+                            <span className="sr-only">关闭</span>
+                          </button>
                         </div>
                       </TableCell>
                     )}

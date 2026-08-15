@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { OperationType, DeviceStatus } from '@prisma/client';
-import { XiaomiDeviceInfo } from '@shared/index';
+import { XiaomiDeviceInfo, inferDeviceCategory, DeviceCategory } from '@shared/index';
 import prisma from '../../lib/prisma';
 import redis from '../../lib/redis';
 import { writeOperation } from '../../lib/logger';
@@ -67,7 +67,7 @@ function sleep(ms: number): Promise<void> {
 export interface XiaomiAuthStatus {
   state: 'idle' | 'logged_in' | 'challenge_required' | 'error';
   needsVerification: boolean;
-  verificationMethod?: 'browser' | 'email_code' | null;
+  verificationMethod?: 'browser' | 'email_code' | 'mobile_code' | null;
   message?: string;
   notificationUrl?: string;
   securityStatus?: number | null;
@@ -77,6 +77,14 @@ export interface XiaomiAuthStatus {
   codeSentAt?: string | null;
   username?: string;
   lastAttemptAt?: string | null;
+  region?: string | null;
+  notificationId?: string | null;
+  emailMask?: string | null;
+  emailBound?: boolean | null;
+  sendFailed?: boolean | null;
+  rawSendBody?: any;
+  rawIdentityListBody?: any;
+  notificationList?: Array<any>;
 }
 
 export interface XiaomiCookieLoginInput {
@@ -96,15 +104,32 @@ interface XiaomiPendingLoginContext {
   verificationMethod?: 'browser' | 'email_code' | null;
   codeSentAt?: string | null;
   lastAttemptAt: string;
+  region?: string;
 }
 
-const SESSION_KEY = 'xiaomi:session';
+type XiaomiSessionScope = 'main' | 'camera';
+
+const SESSION_KEY_MAIN = 'xiaomi:session';
+const SESSION_KEY_CAMERA = 'xiaomi:session:camera';
 const AUTH_STATUS_KEY = 'xiaomi:auth-status';
+const AUTH_STATUS_KEY_CAMERA = 'xiaomi:auth-status:camera';
 const PENDING_LOGIN_KEY = 'xiaomi:pending-login';
+const PENDING_LOGIN_KEY_CAMERA = 'xiaomi:pending-login:camera';
 const SESSION_TTL = 7 * 24 * 60 * 60;
 const REQUEST_TIMEOUT = 10000;
 const REGION_DEFAULT = 'cn';
-const CALLBACK_URL = 'https://sts.api.io.mi.com/sts';
+
+function sessionKeyFor(scope: XiaomiSessionScope): string {
+  return scope === 'camera' ? SESSION_KEY_CAMERA : SESSION_KEY_MAIN;
+}
+
+function authStatusKeyFor(scope: XiaomiSessionScope): string {
+  return scope === 'camera' ? AUTH_STATUS_KEY_CAMERA : AUTH_STATUS_KEY;
+}
+
+function pendingLoginKeyFor(scope: XiaomiSessionScope): string {
+  return scope === 'camera' ? PENDING_LOGIN_KEY_CAMERA : PENDING_LOGIN_KEY;
+}
 
 function getEnvCredentials() {
   return {
@@ -133,11 +158,61 @@ const SIGN_SALT = 'XIAOMI-PROTOCAL-FLAG';
 const DATA_PREFIX = 'data=';
 const SERVICE_LOGIN_URL = 'https://account.xiaomi.com/pass/serviceLoginAuth2';
 const SERVICE_LOGIN_PAGE = 'https://account.xiaomi.com/pass/serviceLogin?sid=xiaomiio&_locale=zh_CN';
+const SERVICE_LOGIN_PAGE_INTL = 'https://account.xiaomi.com/pass/serviceLogin?sid=xiaomiioo&_locale=en_US';
+const CALLBACK_URL = 'https://sts.api.io.mi.com/sts';
+const CALLBACK_URL_INTL = 'https://sts.api.io.mi.com/sts';
 const DEVICE_LIST_URL = 'https://api.io.mi.com/app/home/device_list';
 const GET_PROPS_URL = 'https://api.io.mi.com/app/device/batchreadprop';
 const GET_PROPS_ALT = 'https://api.io.mi.com/app/device/getproperties';
 const DEFAULT_LOCALE = 'zh_CN';
 const DEFAULT_TIMEZONE = 'GMT+08:00';
+
+function isIntlRegion(region?: string): boolean {
+  return !!(region && region.toLowerCase() !== 'cn');
+}
+
+function resolveSsoBase(region?: string): {
+  serviceLoginUrl: string;
+  serviceLoginPage: string;
+  callback: string;
+  sid: string;
+  locale: string;
+  accountOrigin: string;
+  identitySendUrl: string;
+  identityVerifyUrl: string;
+  identityCheckUrl: string;
+  identityListUrl: string;
+  appName: string;
+} {
+  if (isIntlRegion(region)) {
+    return {
+      serviceLoginUrl: SERVICE_LOGIN_URL,
+      serviceLoginPage: 'https://account.xiaomi.com/pass/serviceLogin?sid=xiaomiio&_locale=en_US',
+      callback: CALLBACK_URL,
+      sid: 'xiaomiio',
+      locale: 'en_US',
+      accountOrigin: 'https://account.xiaomi.com',
+      identityListUrl: 'https://account.xiaomi.com/identity/list',
+      identitySendUrl: 'https://account.xiaomi.com/identity/auth/sendEmailTicket',
+      identityVerifyUrl: 'https://account.xiaomi.com/identity/auth/verifyEmail',
+      identityCheckUrl: 'https://account.xiaomi.com/identity/result/check',
+      appName: 'com.xiaomi.smarthome.intl',
+    };
+  }
+  return {
+    serviceLoginUrl: SERVICE_LOGIN_URL,
+    serviceLoginPage: SERVICE_LOGIN_PAGE,
+    callback: CALLBACK_URL,
+    sid: 'xiaomiio',
+    locale: DEFAULT_LOCALE,
+    accountOrigin: 'https://account.xiaomi.com',
+    identityListUrl: 'https://account.xiaomi.com/identity/list',
+    identitySendUrl: 'https://account.xiaomi.com/identity/auth/sendEmailTicket',
+    identityVerifyUrl: 'https://account.xiaomi.com/identity/auth/verifyEmail',
+    identityCheckUrl: 'https://account.xiaomi.com/identity/result/check',
+    appName: 'com.xiaomi.smarthome',
+  };
+}
 
 async function getBusinessTimeZoneSetting(): Promise<string> {
   const setting = await prisma.systemSettings.findUnique({
@@ -244,8 +319,8 @@ class XiaomiAdapter {
     return XiaomiAdapter.instance;
   }
 
-  private async getSession(): Promise<XiaomiSession | null> {
-    const raw = await redis.get(SESSION_KEY);
+  private async getSession(scope: XiaomiSessionScope = 'main'): Promise<XiaomiSession | null> {
+    const raw = await redis.get(sessionKeyFor(scope));
     if (!raw) return null;
     try {
       return JSON.parse(raw) as XiaomiSession;
@@ -254,16 +329,20 @@ class XiaomiAdapter {
     }
   }
 
-  private async setSession(session: XiaomiSession) {
-    await redis.set(SESSION_KEY, JSON.stringify(session), 'EX', SESSION_TTL);
+  public async peekSession(scope: XiaomiSessionScope = 'main'): Promise<XiaomiSession | null> {
+    return this.getSession(scope);
   }
 
-  private async setPendingLogin(context: XiaomiPendingLoginContext) {
-    await redis.set(PENDING_LOGIN_KEY, JSON.stringify(context), 'EX', 30 * 60);
+  private async setSession(session: XiaomiSession, scope: XiaomiSessionScope = 'main') {
+    await redis.set(sessionKeyFor(scope), JSON.stringify(session), 'EX', SESSION_TTL);
   }
 
-  private async getPendingLogin(): Promise<XiaomiPendingLoginContext | null> {
-    const raw = await redis.get(PENDING_LOGIN_KEY);
+  private async setPendingLogin(context: XiaomiPendingLoginContext, scope: XiaomiSessionScope = 'main') {
+    await redis.set(pendingLoginKeyFor(scope), JSON.stringify(context), 'EX', 30 * 60);
+  }
+
+  private async getPendingLogin(scope: XiaomiSessionScope = 'main'): Promise<XiaomiPendingLoginContext | null> {
+    const raw = await redis.get(pendingLoginKeyFor(scope));
     if (!raw) return null;
     try {
       return JSON.parse(raw) as XiaomiPendingLoginContext;
@@ -272,16 +351,16 @@ class XiaomiAdapter {
     }
   }
 
-  private async clearPendingLogin() {
-    await redis.del(PENDING_LOGIN_KEY);
+  private async clearPendingLogin(scope: XiaomiSessionScope = 'main') {
+    await redis.del(pendingLoginKeyFor(scope));
   }
 
-  private async setAuthStatus(status: XiaomiAuthStatus) {
-    await redis.set(AUTH_STATUS_KEY, JSON.stringify(status), 'EX', SESSION_TTL);
+  private async setAuthStatus(status: XiaomiAuthStatus, scope: XiaomiSessionScope = 'main') {
+    await redis.set(authStatusKeyFor(scope), JSON.stringify(status), 'EX', SESSION_TTL);
   }
 
-  public async getAuthStatus(): Promise<XiaomiAuthStatus | null> {
-    const raw = await redis.get(AUTH_STATUS_KEY);
+  public async getAuthStatus(scope: XiaomiSessionScope = 'main'): Promise<XiaomiAuthStatus | null> {
+    const raw = await redis.get(authStatusKeyFor(scope));
     if (!raw) return null;
     try {
       return JSON.parse(raw) as XiaomiAuthStatus;
@@ -290,62 +369,76 @@ class XiaomiAdapter {
     }
   }
 
-  public async isLoggedIn(): Promise<boolean> {
-    const session = await this.getSession();
+  public async isLoggedIn(scope: XiaomiSessionScope = 'main'): Promise<boolean> {
+    const session = await this.getSession(scope);
     return !!(session && !/^mock_/.test(session.serviceToken));
   }
 
-  public async login(usernameInput?: string, passwordInput?: string): Promise<boolean> {
-    const env = getEnvCredentials();
+  public async login(
+    usernameInput?: string,
+    passwordInput?: string,
+    scope: XiaomiSessionScope = 'main',
+    regionInput?: string,
+  ): Promise<boolean> {
+    const env = scope === 'camera'
+      ? {
+          username: process.env.XIAOMI_CAMERA_USERNAME ?? process.env.XIAOMI_USERNAME ?? '',
+          password: process.env.XIAOMI_CAMERA_PASSWORD ?? process.env.XIAOMI_PASSWORD ?? '',
+        }
+      : getEnvCredentials();
     const username = usernameInput || env.username;
     const password = passwordInput || env.password;
     if (!username || !password) {
-      throw new Error('缺少米家账号或密码（请在环境变量 XIAOMI_USERNAME/XIAOMI_PASSWORD 中配置）');
+      throw new Error(`缺少米家${scope === 'camera' ? '摄像头区' : ''}账号或密码（请在环境变量 ${scope === 'camera' ? 'XIAOMI_CAMERA_USERNAME/XIAOMI_CAMERA_PASSWORD' : 'XIAOMI_USERNAME/XIAOMI_PASSWORD'} 中配置）`);
     }
+    const region = regionInput?.trim() || (scope === 'camera' ? 'de' : REGION_DEFAULT);
 
-    await redis.del(SESSION_KEY);
-    await this.clearPendingLogin();
+    await redis.del(sessionKeyFor(scope));
+    await this.clearPendingLogin(scope);
     await this.setAuthStatus({
       state: 'idle',
       needsVerification: false,
       verificationMethod: null,
-      message: '正在尝试登录米家账号',
+      message: `正在尝试登录米家${scope === 'camera' ? '摄像头区' : ''}账号`,
       username,
       lastAttemptAt: new Date().toISOString(),
-    });
-    const session = await this.tryLoginAccount(username, password);
-    await this.setSession(session);
+    }, scope);
+    const session = await this.tryLoginAccount(username, password, scope, region);
+    await this.setSession(session, scope);
     await this.setAuthStatus({
       state: 'logged_in',
       needsVerification: false,
       verificationMethod: null,
-      message: '米家账号登录成功',
+      message: `米家${scope === 'camera' ? '摄像头区' : ''}账号登录成功`,
       username,
       lastAttemptAt: new Date().toISOString(),
-    });
+    }, scope);
     return true;
   }
 
-  public async loginWithSession(input: XiaomiCookieLoginInput): Promise<boolean> {
+  public async loginWithSession(
+    input: XiaomiCookieLoginInput,
+    scope: XiaomiSessionScope = 'main',
+  ): Promise<boolean> {
     const userId = input.userId?.trim();
     const serviceToken = input.serviceToken?.trim();
     const ssecurity = input.ssecurity?.trim();
     const username = input.username?.trim() || 'cookie_session';
-    const region = input.region?.trim() || REGION_DEFAULT;
+    const region = input.region?.trim() || (scope === 'camera' ? 'de' : REGION_DEFAULT);
 
     if (!userId || !serviceToken || !ssecurity) {
       throw new Error('缺少 userId / serviceToken / ssecurity，无法建立米家会话');
     }
 
-    await redis.del(SESSION_KEY);
-    await this.clearPendingLogin();
+    await redis.del(sessionKeyFor(scope));
+    await this.clearPendingLogin(scope);
     await this.setAuthStatus({
       state: 'idle',
       needsVerification: false,
-      message: '正在使用会话串登录米家账号',
+      message: `正在使用会话串登录米家${scope === 'camera' ? '摄像头区' : ''}账号`,
       username,
       lastAttemptAt: new Date().toISOString(),
-    });
+    }, scope);
 
     const session: XiaomiSession = {
       userId,
@@ -356,48 +449,16 @@ class XiaomiAdapter {
       loggedAt: new Date().toISOString(),
     };
 
-    // #region debug-point B:adapter-session-input
-    (() => {
-      const fs = require('node:fs');
-      let u = 'http://127.0.0.1:7777/event';
-      let s = 'xiaomi-login-still-fails';
-      try {
-        const e = fs.readFileSync('.dbg/xiaomi-login-still-fails.env', 'utf8');
-        u = e.match(/DEBUG_SERVER_URL=(.+)/)?.[1] || u;
-        s = e.match(/DEBUG_SESSION_ID=(.+)/)?.[1] || s;
-      } catch {}
-      fetch(u, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sessionId: s,
-          runId: 'pre-fix',
-          hypothesisId: 'B',
-          location: 'xiaomi.adapter.ts:loginWithSession',
-          msg: '[DEBUG] adapter received session login input',
-          data: {
-            username,
-            hasUserId: !!userId,
-            serviceTokenLength: serviceToken.length,
-            ssecurityLength: ssecurity.length,
-            region,
-          },
-          ts: Date.now(),
-        }),
-      }).catch(() => {});
-    })();
-    // #endregion
-
     await this.verifySession(session);
-    await this.setSession(session);
+    await this.setSession(session, scope);
     await this.setAuthStatus({
       state: 'logged_in',
       needsVerification: false,
       verificationMethod: null,
-      message: '米家会话串登录成功',
+      message: `米家${scope === 'camera' ? '摄像头区' : ''}会话串登录成功`,
       username,
       lastAttemptAt: new Date().toISOString(),
-    });
+    }, scope);
     return true;
   }
 
@@ -435,6 +496,7 @@ class XiaomiAdapter {
     options?: {
       params?: Record<string, any>;
       referer?: string;
+      origin?: string;
     },
   ) {
     const response = await axios.postForm(url, data, {
@@ -443,7 +505,7 @@ class XiaomiAdapter {
       validateStatus: (s: number) => s >= 200 && s < 400,
       headers: {
         Cookie: cookieHeader,
-        Origin: 'https://account.xiaomi.com',
+        Origin: options?.origin || 'https://account.xiaomi.com',
         Referer: options?.referer || 'https://account.xiaomi.com/',
         'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 12; MI 11 Build/SKQ1.211019.001) APP/com.xiaomi.smarthome APPV/7.0.0',
       },
@@ -482,8 +544,8 @@ class XiaomiAdapter {
     throw new Error('米家 STS 跳转次数过多');
   }
 
-  public async sendEmailVerificationCode(): Promise<boolean> {
-    const pending = await this.getPendingLogin();
+  public async sendEmailVerificationCode(scope: XiaomiSessionScope = 'main'): Promise<boolean> {
+    const pending = await this.getPendingLogin(scope);
     if (!pending?.notificationUrl) {
       throw new Error('没有待完成的米家邮箱验证，请先重新登录');
     }
@@ -502,54 +564,254 @@ class XiaomiAdapter {
       throw new Error('米家验证上下文缺失，无法发送邮箱验证码');
     }
 
+    const sso = resolveSsoBase(pending.region);
+
     let cookieHeader = pending.cookieHeader;
 
+    console.info('[XiaomiAdapter.sendEmailVerificationCode] 开始：', {
+      scope,
+      region: pending.region,
+      username: pending.username,
+      notificationUrl: pending.notificationUrl,
+      context,
+      sso: {
+        serviceLoginPage: sso.serviceLoginPage,
+        identityListUrl: sso.identityListUrl,
+        identitySendUrl: sso.identitySendUrl,
+        sid: sso.sid,
+        locale: sso.locale,
+        accountOrigin: sso.accountOrigin,
+      },
+    });
+
     const authStartResult = await this.getWithCookieContext(pending.notificationUrl, cookieHeader, {
-      referer: SERVICE_LOGIN_PAGE,
+      referer: sso.serviceLoginPage,
     });
     cookieHeader = authStartResult.cookieHeader;
+    console.info('[XiaomiAdapter.sendEmailVerificationCode] authStart (notificationUrl GET)：', {
+      status: authStartResult.response.status,
+      location: (authStartResult.response.headers as any)?.location ?? null,
+      hasIck: !!getCookieValue(cookieHeader, 'ick'),
+      hasPassToken: !!getCookieValue(cookieHeader, 'passToken'),
+      cookieHead: cookieHeader.slice(0, 260),
+      bodyHead: typeof authStartResult.response.data === 'string'
+        ? authStartResult.response.data.slice(0, 400)
+        : JSON.stringify(authStartResult.response.data ?? {}).slice(0, 400),
+    });
 
     const listResult = await this.getWithCookieContext(
-      'https://account.xiaomi.com/identity/list',
+      sso.identityListUrl,
       cookieHeader,
       {
         params: {
-          sid: 'xiaomiio',
+          sid: sso.sid,
           context,
-          _locale: 'en_US',
+          _locale: sso.locale,
         },
       },
     );
     cookieHeader = listResult.cookieHeader;
+    const listRawRaw = typeof listResult.response.data === 'string'
+      ? listResult.response.data
+      : JSON.stringify(listResult.response.data ?? {});
+    console.info('[XiaomiAdapter.sendEmailVerificationCode] identityList 返回：', {
+      status: listResult.response.status,
+      url: sso.identityListUrl,
+      params: { sid: sso.sid, context, _locale: sso.locale },
+      bodyHead: listRawRaw.slice(0, 1500),
+    });
+
+    let listPayload: any = null;
+    try { listPayload = typeof listResult.response.data === 'string' ? JSON.parse(listResult.response.data.replace(/^&&&START&&&/, '')) : listResult.response.data; } catch {}
+    const candidates: any[] = [];
+    if (listPayload && typeof listPayload === 'object') {
+      if (Array.isArray(listPayload.notifications)) candidates.push(...listPayload.notifications);
+      if (Array.isArray((listPayload as any).notificationList)) candidates.push(...((listPayload as any).notificationList));
+      if (Array.isArray((listPayload as any).data?.notifications)) candidates.push(...((listPayload as any).data.notifications));
+      if (Array.isArray((listPayload as any).result?.notifications)) candidates.push(...((listPayload as any).result.notifications));
+      if (Array.isArray((listPayload as any).data?.notificationList)) candidates.push(...((listPayload as any).data.notificationList));
+      if (Array.isArray((listPayload as any).result?.notificationList)) candidates.push(...((listPayload as any).result.notificationList));
+    }
+    const notificationIds: string[] = [];
+    const notificationDetails: Array<{ id: string; type: string; detail: string; method: string; via: string; channel: string }> = [];
+    let emailMask: string | null = null;
+    let listHasEmail = false;
+    let listHasMobile = false;
+    let preferredNotification: any = null;
+    for (const n of candidates) {
+      if (!n || typeof n !== 'object') continue;
+      const id = String(n.notificationId ?? n.id ?? n.ticket ?? n.identityId ?? '').trim();
+      const detail = String(n.detail ?? n.displayName ?? n.phone ?? n.email ?? n.credential ?? n.mask ?? n.title ?? '').trim();
+      const type = String(n.type ?? n.channel ?? n.method ?? n.via ?? n.kind ?? '').toLowerCase();
+      const methodRaw = String(n.method ?? n.notificationMethod ?? n.notifyMethod ?? n.sendMethod ?? '').toLowerCase();
+      const viaRaw = String(n.via ?? n.sendVia ?? n.route ?? '').toLowerCase();
+      const channelRaw = String(n.channel ?? n.notificationChannel ?? '').toLowerCase();
+      if (id) notificationIds.push(id);
+      notificationDetails.push({ id, type, detail, method: methodRaw, via: viaRaw, channel: channelRaw });
+      const isEmail =
+        detail.includes('@') ||
+        type.includes('mail') ||
+        methodRaw.includes('mail') ||
+        viaRaw.includes('mail') ||
+        channelRaw.includes('mail') ||
+        String(n.kind ?? '').toLowerCase().includes('mail') ||
+        String(n.category ?? '').toLowerCase().includes('mail') ||
+        (id.toLowerCase().includes('mail') && detail);
+      const isMobile =
+        !isEmail &&
+        (type.includes('mobile') ||
+          type.includes('sms') ||
+          type.includes('phone') ||
+          methodRaw.includes('mobile') ||
+          methodRaw.includes('sms') ||
+          viaRaw.includes('sms') ||
+          viaRaw.includes('mobile') ||
+          channelRaw.includes('sms') ||
+          channelRaw.includes('mobile') ||
+          /^[+\-\s\(\)\d]+$/.test(detail.replace(/\s+/g, '')));
+      if (isEmail && !listHasEmail) {
+        listHasEmail = true;
+        emailMask = detail;
+        preferredNotification = n;
+      }
+      if (isMobile) {
+        listHasMobile = true;
+        if (!preferredNotification) preferredNotification = n;
+      }
+    }
+    console.info('[XiaomiAdapter.sendEmailVerificationCode] identityList 解析：', {
+      totalNotifications: candidates.length,
+      notificationIds,
+      notificationDetails,
+      listHasEmail,
+      listHasMobile,
+      emailMask,
+      preferredNotificationId: preferredNotification ? String(preferredNotification.notificationId ?? preferredNotification.id ?? '').trim() : null,
+      listKeys: listPayload && typeof listPayload === 'object' ? Object.keys(listPayload) : null,
+    });
+
+    const v2DirectVerify =
+      listPayload && typeof listPayload === 'object' && (
+        (listPayload as any).directVerify === true ||
+        (listPayload as any).code === 2 ||
+        String((listPayload as any).retrieveType ?? '').toLowerCase() === 'bind' ||
+        (Number((listPayload as any).flag ?? 0) & 8) === 8
+      ) ? true : false;
+    if (v2DirectVerify && !listHasEmail && !listHasMobile) {
+      listHasEmail = true;
+      emailMask = pending.username?.includes('@') ? pending.username : emailMask || '绑定安全邮箱';
+      console.info('[XiaomiAdapter.sendEmailVerificationCode] 触发 EU v2 directVerify=true（retrieveType=bind, code=2, flag=8，直接发邮箱验证（无需 identity/notifications）。');
+    }
+
+    const writeAuthDiagnosis = async (extra: Partial<XiaomiAuthStatus>) => {
+      await this.setAuthStatus(
+        {
+          state: 'challenge_required',
+          needsVerification: true,
+          verificationMethod: listHasEmail ? 'email_code' : listHasMobile ? 'mobile_code' : null,
+          message: extra?.message ?? '请完成验证',
+          notificationUrl: pending.notificationUrl,
+          securityStatus: 16,
+          username: pending.username,
+          lastAttemptAt: new Date().toISOString(),
+          rawIdentityListBody: listPayload ?? listResult.response.data ?? null,
+          notificationList: candidates.length ? candidates : undefined,
+          ...extra,
+        },
+        scope,
+      );
+    };
+
+    if (!listHasEmail && !listHasMobile) {
+      await writeAuthDiagnosis({
+        emailBound: false,
+        message:
+          '该 EU 米家账号当前未启用可用的验证通知方式。请在手机米家 APP（或 account.xiaomi.com → 登录与安全）里绑定邮箱/手机号为二次验证方式，或先从米家官方 APP 登录 EU 区设备一次激活验证方式后再回来重试。（identity/list 无可用 email/sms 渠道）',
+      });
+      throw new Error(
+        '未找到可用的 EU 账号验证方式（identity/list 返回的通知渠道里既没有 email 也没有手机 sms）。请先到 account.xiaomi.com → 登录与安全 里绑定/启用邮箱或手机号为验证方式后再试。',
+      );
+    }
+    const useMethod: 'email' | 'mobile' = listHasEmail ? 'email' : 'mobile';
+    const chosenId: string =
+      (preferredNotification ? String(preferredNotification.notificationId ?? preferredNotification.id ?? '').trim() : '') ||
+      notificationIds[0] ||
+      '';
+    const identitySendUrl: string =
+      useMethod === 'email' ? sso.identitySendUrl : sso.identitySendUrl.replace('/sendEmailTicket', '/sendMobileTicket').replace('/auth/sendEmailTicket', '/auth/sendMobileTicket');
+    if (useMethod === 'mobile') {
+      console.warn('[XiaomiAdapter.sendEmailVerificationCode] 没有 email 渠道，回退为短信（mobile_code）验证，目标 URL =', identitySendUrl);
+    }
 
     const sendResult = await this.postFormWithCookieContext(
-      'https://account.xiaomi.com/identity/auth/sendEmailTicket',
+      identitySendUrl,
       cookieHeader,
       {
+        _flag: String(useMethod === 'email' ? '8' : useMethod === 'mobile' ? '4' : '8'),
         retry: '0',
         icode: '',
         _json: 'true',
         ick: getCookieValue(cookieHeader, 'ick'),
+        ...(chosenId ? { notificationId: chosenId } : {}),
       },
       {
         params: {
           _dc: String(Date.now()),
-          sid: 'xiaomiio',
+          sid: sso.sid,
           context,
           mask: '0',
-          _locale: 'en_US',
+          _locale: sso.locale,
         },
+        origin: sso.accountOrigin,
+        referer: sso.accountOrigin + '/',
       },
     );
     cookieHeader = sendResult.cookieHeader;
 
     let payload: any = null;
     try {
-      payload = typeof sendResult.response.data === 'string'
-        ? JSON.parse(sendResult.response.data)
+      const raw = typeof sendResult.response.data === 'string'
+        ? sendResult.response.data.replace(/^&&&START&&&/, '')
         : sendResult.response.data;
+      payload = typeof raw === 'string' ? JSON.parse(raw) : raw;
     } catch {
       payload = null;
+    }
+
+    console.info('[XiaomiAdapter.sendEmailVerificationCode] identitySend 返回：', {
+      status: sendResult.response.status,
+      url: identitySendUrl,
+      useMethod,
+      chosenId,
+      sendBody: { retry: '0', icode: '', _json: 'true', ick: getCookieValue(cookieHeader, 'ick'), ...(chosenId ? { notificationId: chosenId } : {}) },
+      sendParams: { _dc: String(Date.now()), sid: sso.sid, context, mask: '0', _locale: sso.locale },
+      payloadKeys: payload && typeof payload === 'object' ? Object.keys(payload) : null,
+      bodyFull: payload ? JSON.stringify(payload).slice(0, 2000) : (typeof sendResult.response.data === 'string' ? sendResult.response.data.slice(0, 2000) : JSON.stringify(sendResult.response.data ?? '').slice(0, 2000)),
+    });
+
+    const sendOk =
+      (payload && typeof payload === 'object' && (payload.result === 'ok' || payload.code === 0 || payload.status === 0 || (payload.notificationId && payload.sent !== false)))
+        ? true
+        : (sendResult.response.status >= 200 && sendResult.response.status < 400 && !(payload && typeof payload === 'object' && (payload.code && payload.code !== 0 || payload.result === 'error')));
+    if (!sendOk) {
+      const msg = payload && typeof payload === 'object'
+        ? (String([payload?.tips, payload?.desc, payload?.description, payload?.message, payload?.title, payload?.action].filter(Boolean).join(' · ') || '').trim() || `${useMethod === 'email' ? 'identity/sendEmailTicket' : 'identity/sendMobileTicket'} 拒绝，code=${String(payload.code ?? 'unknown')}`)
+        : `${useMethod === 'email' ? 'identity/sendEmailTicket' : 'identity/sendMobileTicket'} HTTP ${sendResult.response.status}`;
+      await this.setAuthStatus({
+        state: 'error',
+        needsVerification: true,
+        verificationMethod: useMethod === 'email' ? 'email_code' : 'mobile_code',
+        message: msg,
+        notificationUrl: pending.notificationUrl,
+        securityStatus: 16,
+        username: pending.username,
+        sendFailed: true,
+        lastAttemptAt: new Date().toISOString(),
+        rawSendBody: payload ?? null,
+        rawIdentityListBody: listPayload ?? listResult.response.data ?? null,
+        notificationList: candidates.length ? candidates : undefined,
+      }, scope);
+      throw new Error(msg);
     }
 
     const codeSentAt = new Date().toISOString();
@@ -557,27 +819,35 @@ class XiaomiAdapter {
       ...pending,
       cookieHeader,
       context,
-      verificationMethod: 'email_code',
+      verificationMethod: useMethod === 'email' ? 'email_code' : 'mobile_code',
       codeSentAt,
       lastAttemptAt: codeSentAt,
-    });
+      notificationId: chosenId ?? (pending as any).notificationId ?? undefined,
+      emailMask,
+    } as any, scope);
+
     await this.setAuthStatus({
       state: 'challenge_required',
       needsVerification: true,
-      verificationMethod: 'email_code',
-      message: payload?.description || payload?.desc || '米家验证码已发送到邮箱，请输入验证码完成登录',
+      verificationMethod: useMethod === 'email' ? 'email_code' : 'mobile_code',
+      message: useMethod === 'email' ? `验证码已发送至邮箱 ${emailMask ?? ''}，请查收并输入` : `验证码已通过短信发送至 ${chosenId}，请查收并输入`,
       notificationUrl: pending.notificationUrl,
       securityStatus: 16,
       username: pending.username,
+      notificationId: chosenId ?? undefined,
+      emailMask,
+      emailBound: useMethod === 'email',
       codeSentAt,
       lastAttemptAt: codeSentAt,
-    });
+      rawIdentityListBody: listPayload ?? listResult.response.data ?? null,
+      notificationList: candidates.length ? candidates : undefined,
+    }, scope);
 
     return true;
   }
 
-  public async verifyEmailCode(code: string): Promise<boolean> {
-    const pending = await this.getPendingLogin();
+  public async verifyEmailCode(code: string, scope: XiaomiSessionScope = 'main'): Promise<boolean> {
+    const pending = await this.getPendingLogin(scope);
     const verificationCode = code.trim();
     if (!pending?.notificationUrl) {
       throw new Error('没有待完成的米家邮箱验证，请先重新登录');
@@ -600,9 +870,11 @@ class XiaomiAdapter {
       throw new Error('米家验证上下文缺失，无法校验邮箱验证码');
     }
 
+    const sso = resolveSsoBase(pending.region);
+
     let cookieHeader = pending.cookieHeader;
     const verifyResult = await this.postFormWithCookieContext(
-      'https://account.xiaomi.com/identity/auth/verifyEmail',
+      sso.identityVerifyUrl,
       cookieHeader,
       {
         _flag: '8',
@@ -615,11 +887,13 @@ class XiaomiAdapter {
         params: {
           _flag: '8',
           _json: 'true',
-          sid: 'xiaomiio',
+          sid: sso.sid,
           context,
           mask: '0',
-          _locale: 'en_US',
+          _locale: sso.locale,
         },
+        origin: sso.accountOrigin,
+        referer: sso.accountOrigin + '/',
       },
     );
     cookieHeader = verifyResult.cookieHeader;
@@ -636,22 +910,25 @@ class XiaomiAdapter {
       if (locationHeader) {
         finishLocation = locationHeader;
       } else if (typeof verifyResult.response.data === 'string') {
-        const match = verifyResult.response.data.match(/https:\/\/account\.xiaomi\.com\/identity\/result\/check\?[^"'\s]+/);
-        finishLocation = match?.[0] || '';
+        const intlMatch = verifyResult.response.data.match(/https:\/\/account\.io\.mi\.com\/identity\/result\/check\?[^"'\s]+/);
+        if (intlMatch) finishLocation = intlMatch[0];
+        const cnMatch = verifyResult.response.data.match(/https:\/\/account\.xiaomi\.com\/identity\/result\/check\?[^"'\s]+/);
+        if (!finishLocation && cnMatch) finishLocation = cnMatch[0];
       }
     }
 
     if (!finishLocation) {
       const fallback = await this.getWithCookieContext(
-        'https://account.xiaomi.com/identity/result/check',
+        sso.identityCheckUrl,
         cookieHeader,
         {
           params: {
-            sid: 'xiaomiio',
+            sid: sso.sid,
             context,
-            _locale: 'en_US',
+            _locale: sso.locale,
           },
           allowRedirects: false,
+          referer: sso.accountOrigin + '/',
         },
       );
       cookieHeader = fallback.cookieHeader;
@@ -735,13 +1012,13 @@ class XiaomiAdapter {
       serviceToken,
       ssecurity,
       username: pending.username,
-      region: REGION_DEFAULT,
+      region: pending.region?.trim() || (scope === 'camera' ? 'de' : REGION_DEFAULT),
       loggedAt: new Date().toISOString(),
     };
 
     await this.verifySession(session);
-    await this.setSession(session);
-    await this.clearPendingLogin();
+    await this.setSession(session, scope);
+    await this.clearPendingLogin(scope);
     await this.setAuthStatus({
       state: 'logged_in',
       needsVerification: false,
@@ -750,13 +1027,13 @@ class XiaomiAdapter {
       username: pending.username,
       codeSentAt: pending.codeSentAt || null,
       lastAttemptAt: new Date().toISOString(),
-    });
+    }, scope);
 
     return true;
   }
 
-  public async continueLogin(): Promise<boolean> {
-    const pending = await this.getPendingLogin();
+  public async continueLogin(scope: XiaomiSessionScope = 'main'): Promise<boolean> {
+    const pending = await this.getPendingLogin(scope);
     // #region debug-point B:adapter-continue-pending
     (() => {
       const fs = require('node:fs');
@@ -800,42 +1077,54 @@ class XiaomiAdapter {
       notificationUrl: pending.notificationUrl,
       username: pending.username,
       lastAttemptAt: new Date().toISOString(),
-    });
+    }, scope);
 
     const session = await this.loginHttpWithContext(
       pending.username,
       pending.cookieHeader,
       pending.formData,
+      scope,
+      pending.region,
     );
-    await this.setSession(session);
-    await this.clearPendingLogin();
+    await this.setSession(session, scope);
+    await this.clearPendingLogin(scope);
     await this.setAuthStatus({
       state: 'logged_in',
       needsVerification: false,
       message: '米家账号登录成功',
       username: pending.username,
       lastAttemptAt: new Date().toISOString(),
-    });
+    }, scope);
     return true;
   }
 
-  private async tryLoginAccount(username: string, password: string): Promise<XiaomiSession> {
+  private async tryLoginAccount(
+    username: string,
+    password: string,
+    scope: XiaomiSessionScope = 'main',
+    region?: string,
+  ): Promise<XiaomiSession> {
     try {
-      return await this.loginHttp(username, password);
+      return await this.loginHttp(username, password, scope, region);
     } catch (httpErr: any) {
       console.error('[XiaomiAdapter] 真实米家登录失败：', httpErr?.message || httpErr, httpErr?.stack ?? '');
       throw new Error(httpErr?.message || '米家真实登录失败');
     }
   }
 
-  private async loginHttp(username: string, password: string): Promise<XiaomiSession> {
+  private async loginHttp(
+    username: string,
+    password: string,
+    scope: XiaomiSessionScope = 'main',
+    region?: string,
+  ): Promise<XiaomiSession> {
     const hashPwd = crypto.createHash('md5').update(password, 'utf8').digest('hex').toUpperCase();
-    const sid = 'xiaomiio';
+    const scopeDefault = scope === 'camera' ? 'de' : REGION_DEFAULT;
+    const effectiveRegion = (region?.trim().toLowerCase()) || scopeDefault;
+    const sso = resolveSsoBase(effectiveRegion);
     const _json = 'true';
-    const locale = 'zh_CN';
-    const callback = CALLBACK_URL;
     console.debug('[XiaomiAdapter] step0 获取 serviceLogin _sign');
-    const step0Resp = await axios.get(SERVICE_LOGIN_PAGE, {
+    const step0Resp = await axios.get(sso.serviceLoginPage, {
       timeout: REQUEST_TIMEOUT,
       maxRedirects: 0,
       validateStatus: (s: number) => s >= 200 && s < 400,
@@ -843,13 +1132,13 @@ class XiaomiAdapter {
         'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 12; MI 11 Build/SKQ1.211019.001) APP/com.xiaomi.smarthome APPV/7.0.0',
         Accept: 'application/json',
       },
-      params: { sid, _json },
+      params: { sid: sso.sid, _json, _locale: sso.locale },
     });
     const rawStep0 = step0Resp.data?.startsWith?.('&&&START&&&') ? step0Resp.data.slice('&&&START&&&'.length) : step0Resp.data;
     let step0Payload: any = {};
     try { step0Payload = typeof rawStep0 === 'string' ? JSON.parse(rawStep0) : (rawStep0 ?? {}); } catch { /* ignore */ }
     const _sign = step0Payload?._sign ?? '';
-    const qs = encodeURIComponent(`?sid=${sid}&_json=${_json}`);
+    const qs = encodeURIComponent(`?sid=${sso.sid}&_locale=${encodeURIComponent(sso.locale)}&_json=${_json}`);
 
     const cookies: string[] = [];
     const setCookie = step0Resp.headers['set-cookie'];
@@ -865,39 +1154,47 @@ class XiaomiAdapter {
     cookies.push(`deviceId=${deviceId}`);
     cookies.push(`sdkVersion=accountsdk-18.8.15`);
     const cookieHeader = cookies.join('; ');
-    console.debug('[XiaomiAdapter] step1 cookie count=', cookies.length, '_sign len=', String(_sign).length, 'qs=', qs);
+    console.debug('[XiaomiAdapter] step1 cookie count=', cookies.length, '_sign len=', String(_sign).length, 'sso.locale=', sso.locale);
 
     const data: Record<string, any> = {
       _json,
-      sid,
-      callback,
-      locale,
+      sid: sso.sid,
+      callback: sso.callback,
+      locale: sso.locale,
+      _locale: sso.locale,
       user: username,
       hash: hashPwd,
       _sign,
       qs,
     };
 
-    return this.loginHttpWithContext(username, cookieHeader, data);
+    return this.loginHttpWithContext(username, cookieHeader, data, scope, region);
   }
 
   private async loginHttpWithContext(
     username: string,
     cookieHeader: string,
     data: Record<string, any>,
+    scope: XiaomiSessionScope = 'main',
+    regionInput?: string,
   ): Promise<XiaomiSession> {
+    const scopeDefault2 = scope === 'camera' ? 'de' : REGION_DEFAULT;
+    const effectiveRegion2 = (regionInput?.trim().toLowerCase()) || scopeDefault2;
+    const sso2 = resolveSsoBase(effectiveRegion2);
     console.debug('[XiaomiAdapter] step2 调用 serviceLoginAuth2 账密校验', {
       user: username,
       sid: data.sid,
       callback: data.callback,
+      ssoLoginUrl: sso2.serviceLoginUrl,
+      effectiveRegion: effectiveRegion2,
     });
-    const loginResp = await axios.postForm<string>(SERVICE_LOGIN_URL, data, {
+    const loginResp = await axios.postForm<string>(sso2.serviceLoginUrl, data, {
       timeout: REQUEST_TIMEOUT,
       validateStatus: (s: number) => s >= 200 && s < 500,
       headers: {
         Cookie: cookieHeader,
-        Origin: 'https://account.xiaomi.com',
-        Referer: SERVICE_LOGIN_PAGE,
+        Origin: sso2.accountOrigin,
+        Referer: sso2.serviceLoginPage,
         'User-Agent': 'Dalvik/2.1.0 (Linux; U; Android 12; MI 11 Build/SKQ1.211019.001) APP/com.xiaomi.smarthome APPV/7.0.0',
       },
     });
@@ -993,12 +1290,12 @@ class XiaomiAdapter {
         location: payload?.location ?? null,
         username,
         lastAttemptAt: new Date().toISOString(),
-      });
+      }, scope);
       console.error('[XiaomiAdapter] 登录失败完整响应 payload=', JSON.stringify(payload ?? {}).slice(0, 2000));
       if (payload?.notificationUrl) {
         console.warn('[XiaomiAdapter] 触发米家两步验证，请在浏览器打开:', payload.notificationUrl);
       }
-      await this.clearPendingLogin();
+      await this.clearPendingLogin(scope);
       throw new Error(`Xiaomi 登录失败 code=${code} desc=${msg}`);
     }
     if (!payload.userId || !payload.ssecurity || !payload.location) {
@@ -1017,7 +1314,8 @@ class XiaomiAdapter {
           verificationMethod: payload?.notificationUrl ? 'email_code' : 'browser',
           codeSentAt: null,
         lastAttemptAt: new Date().toISOString(),
-      });
+        region: regionInput || (scope === 'camera' ? 'de' : REGION_DEFAULT),
+      }, scope);
       await this.setAuthStatus({
         state: payload?.notificationUrl ? 'challenge_required' : 'error',
         needsVerification: !!payload?.notificationUrl,
@@ -1033,7 +1331,7 @@ class XiaomiAdapter {
           codeSentAt: null,
         username,
         lastAttemptAt: new Date().toISOString(),
-      });
+      }, scope);
       console.error('[XiaomiAdapter] 缺少 userId/ssecurity/location 字段 payload=', JSON.stringify(payload ?? {}).slice(0, 2000));
       if (payload?.notificationUrl) {
         throw new Error('米家需要安全验证，请完成验证后返回本页继续登录');
@@ -1044,7 +1342,11 @@ class XiaomiAdapter {
 
     const location = payload.location as string;
     const m = location.match(/region=([a-z]{2})/i);
-    const region = m ? m[1].toLowerCase() : REGION_DEFAULT;
+    const scopeDefault = scope === 'camera' ? 'de' : REGION_DEFAULT;
+    const region =
+      (regionInput?.trim().toLowerCase()) ||
+      scopeDefault ||
+      (m ? m[1].toLowerCase() : REGION_DEFAULT);
 
     console.debug('[XiaomiAdapter] step3 callback 获取 serviceToken: url=', String(location).slice(0, 200));
     const cbResp = await axios.get(location, {
@@ -1166,10 +1468,137 @@ class XiaomiAdapter {
   }
 
   private async requestIo(session: XiaomiSession, method: 'GET' | 'POST', path: string, params?: Record<string, any>, body?: any) {
+    const regionLower = (session.region || REGION_DEFAULT).toLowerCase();
+    const isIntl = regionLower !== 'cn';
+    const intlHostCandidates = isIntl
+      ? Array.from(new Set([regionLower, 'de', 'at', 'us', 'sg', 'i2', 'ru', 'tw', 'in'].filter((x) => x && x.toLowerCase() !== 'cn')))
+      : ['cn'];
+    const signByRegion = async (regionForSign: string) => {
+      const sessionSnapshot: XiaomiSession = { ...session, region: regionForSign };
+      const signed = await this.signRequest(sessionSnapshot, method, path, params, body);
+      return signed;
+    };
+    const localeForRegionFn = (r: string) => {
+      const rr = r.toLowerCase();
+      if (rr === 'cn') return DEFAULT_LOCALE;
+      if (rr === 'at' || rr === 'de') return 'de_DE';
+      if (rr === 'fr') return 'fr_FR';
+      if (rr === 'ru') return 'ru_RU';
+      if (rr === 'sg') return 'en_SG';
+      if (rr === 'us') return 'en_US';
+      if (rr === 'in') return 'en_IN';
+      return 'en_US';
+    };
+    const timezoneForRegionFn = (r: string) => {
+      const rr = r.toLowerCase();
+      if (rr === 'cn') return DEFAULT_TIMEZONE;
+      if (rr === 'at' || rr === 'de' || rr === 'fr') return 'GMT+01:00';
+      if (rr === 'ru') return 'GMT+03:00';
+      if (rr === 'sg' || rr === 'in' || rr === 'tw') return 'GMT+08:00';
+      if (rr === 'us') return 'GMT-08:00';
+      return 'GMT+01:00';
+    };
+    let lastError: any = null;
+    for (const r of intlHostCandidates) {
+      try {
+        const rr = r.toLowerCase();
+        const signed = await signByRegion(rr);
+        const regionForApiBase = rr;
+        const apiBase = buildApiBaseUrl(regionForApiBase);
+        const url = `${apiBase}${path.startsWith('/') ? '' : '/'}${path}`;
+        const localeHere = localeForRegionFn(rr);
+        const tzHere = timezoneForRegionFn(rr);
+        const areaHere = rr === 'i2' ? 'SG' : rr.toUpperCase();
+        const isIntlLocal = rr !== 'cn';
+        console.info('[XiaomiAdapter.requestIo] probe:', { regionTry: rr, apiBase, path, qsKeys: Object.keys(signed.qs ?? {}).length });
+        const resp = await axios({
+          url,
+          method: 'POST',
+          params: signed.qs,
+          headers: {
+            Cookie: [
+              `userId=${session.userId}`,
+              `serviceToken=${session.serviceToken}`,
+              `yetAnotherServiceToken=${session.serviceToken}`,
+              `locale=${localeHere}`,
+              `timezone=${encodeURIComponent(tzHere)}`,
+              'is_daylight=0',
+              'dst_offset=0',
+              'channel=MI_APP_STORE',
+              isIntlLocal ? `miphone-area=${areaHere}` : null,
+            ].filter(Boolean).join('; '),
+            'User-Agent': isIntlLocal
+              ? 'Android-7.1.1-1.0.0-ONEPLUS A3010-136-ABCDEABCDEABC APP/xiaomi.smarthome.intl APPV/62830'
+              : 'Android-7.1.1-1.0.0-ONEPLUS A3010-136-ABCDEABCDEABC APP/xiaomi.smarthome APPV/62830',
+            Accept: 'application/json',
+            'Accept-Encoding': 'gzip',
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'x-xiaomi-protocal-flag-cli': 'PROTOCAL-HTTP2',
+            ...(isIntlLocal ? { 'MIoT-Region': areaHere } : null),
+          },
+          timeout: REQUEST_TIMEOUT,
+          validateStatus: (s: number) => s >= 200 && s < 500,
+        });
+        const data = resp.data;
+        console.debug('[XiaomiAdapter] requestIo done:', method, path, 'region=', rr, 'status=', resp.status, 'code=', typeof data === 'object' && data ? data.code ?? '<ok>' : '<non-obj>');
+        if (resp.status >= 400) {
+          const message =
+            typeof data === 'object' && data
+              ? data?.message || data?.desc || JSON.stringify(data).slice(0, 300)
+              : String(data ?? '');
+          lastError = new Error(`[XiaomiAdapter] requestIo region=${rr} HTTP ${resp.status}: ${String(message).slice(0, 400)}`);
+          continue;
+        }
+        const listLen =
+          (data && typeof data === 'object' && Array.isArray(data.list) && data.list.length) ||
+          (data && typeof data === 'object' && Array.isArray(data.device_list) && data.device_list.length) ||
+          (data?.result && Array.isArray(data.result.list) && data.result.list.length) ||
+          (data?.result && Array.isArray(data.result.device_list) && data.result.device_list.length) ||
+          0;
+        if (data && typeof data === 'object' && data.code !== undefined && data.code !== 0) {
+          if (listLen > 0) {
+            return data;
+          }
+          lastError = new Error(`[XiaomiAdapter] requestIo region=${rr} code=${String(data.code)} msg=${String(data?.message ?? data?.desc ?? '').slice(0, 300)}`);
+          continue;
+        }
+        return data;
+      } catch (probeErr: any) {
+        lastError = probeErr;
+        console.warn('[XiaomiAdapter.requestIo] probeErr:', { region: r, message: probeErr?.message, status: probeErr?.response?.status ?? null });
+      }
+    }
+    if (lastError) throw lastError;
+    throw new Error('[XiaomiAdapter] requestIo 所有 EU 归属国探测均未成功');
+  }
+
+  private async requestIo_OLD_DISABLED(session: XiaomiSession, method: 'GET' | 'POST', path: string, params?: Record<string, any>, body?: any) {
     const { qs } = await this.signRequest(session, method, path, params, body);
     const url = `${buildApiBaseUrl(session.region)}${path.startsWith('/') ? '' : '/'}${path}`;
+    const regionLower = (session.region || REGION_DEFAULT).toLowerCase();
+    const isIntl = regionLower !== 'cn';
+    const localeForRegion = isIntl
+      ? (
+        regionLower === 'at' || regionLower === 'de' ? 'de_DE'
+        : regionLower === 'fr' ? 'fr_FR'
+        : regionLower === 'ru' ? 'ru_RU'
+        : regionLower === 'sg' ? 'en_SG'
+        : regionLower === 'us' ? 'en_US'
+        : regionLower === 'in' ? 'en_IN'
+        : 'en_US'
+      )
+      : DEFAULT_LOCALE;
+    const timezoneForRegion = isIntl
+      ? (
+        regionLower === 'at' || regionLower === 'de' || regionLower === 'fr' ? 'GMT+01:00'
+        : regionLower === 'ru' ? 'GMT+03:00'
+        : regionLower === 'sg' || regionLower === 'in' ? 'GMT+08:00'
+        : regionLower === 'us' ? 'GMT-08:00'
+        : 'GMT+01:00'
+      )
+      : DEFAULT_TIMEZONE;
     try {
-      console.debug('[XiaomiAdapter] requestIo start:', method, path, 'qs keys=', Object.keys(qs ?? {}).length);
+      console.debug('[XiaomiAdapter] requestIo start:', method, path, 'qs keys=', Object.keys(qs ?? {}).length, 'region=', regionLower, 'apiBase=', buildApiBaseUrl(session.region));
       const resp = await axios({
         url,
         method: 'POST',
@@ -1179,17 +1608,21 @@ class XiaomiAdapter {
             `userId=${session.userId}`,
             `serviceToken=${session.serviceToken}`,
             `yetAnotherServiceToken=${session.serviceToken}`,
-            `locale=${DEFAULT_LOCALE}`,
-            `timezone=${encodeURIComponent(DEFAULT_TIMEZONE)}`,
+            `locale=${localeForRegion}`,
+            `timezone=${encodeURIComponent(timezoneForRegion)}`,
             'is_daylight=0',
             'dst_offset=0',
             'channel=MI_APP_STORE',
-          ].join('; '),
-          'User-Agent': 'Android-7.1.1-1.0.0-ONEPLUS A3010-136-ABCDEABCDEABC APP/xiaomi.smarthome APPV/62830',
+            isIntl ? `miphone-area=${regionLower.toUpperCase()}` : null,
+          ].filter(Boolean).join('; '),
+          'User-Agent': isIntl
+            ? 'Android-7.1.1-1.0.0-ONEPLUS A3010-136-ABCDEABCDEABC APP/xiaomi.smarthome.intl APPV/62830'
+            : 'Android-7.1.1-1.0.0-ONEPLUS A3010-136-ABCDEABCDEABC APP/xiaomi.smarthome APPV/62830',
           Accept: 'application/json',
           'Accept-Encoding': 'gzip',
           'Content-Type': 'application/x-www-form-urlencoded',
           'x-xiaomi-protocal-flag-cli': 'PROTOCAL-HTTP2',
+          ...(isIntl ? { 'MIoT-Region': regionLower.toUpperCase() } : null),
         },
         timeout: REQUEST_TIMEOUT,
         validateStatus: (s: number) => s >= 200 && s < 500,
@@ -1336,6 +1769,8 @@ class XiaomiAdapter {
               currentA: p.currentA,
               voltageV: p.voltageV ?? 220,
               totalKwh: p.totalKwh,
+              sourceRegion: session?.region || 'cn',
+              sourceScope: 'main',
             });
           }
           this.assignFallbackRoomIds(listReal, rooms, existingDevices);
@@ -1372,7 +1807,11 @@ class XiaomiAdapter {
         ? resp
         : Array.isArray(resp?.list)
           ? resp.list
-          : [];
+          : Array.isArray((resp as any)?.result)
+            ? (resp as any).result
+            : Array.isArray((resp as any)?.result?.list)
+              ? (resp as any).result.list
+              : [];
       if (Array.isArray(items)) {
         const modelMap = new Map(onlineDevices.map((device) => [device.did, device.model ?? '']));
         for (const item of items) {
@@ -1579,8 +2018,8 @@ class XiaomiAdapter {
     return getDayKey(new Date(tsSec * 1000), timeZone);
   }
 
-  private dayKeyToDate(dayKey: string): Date {
-    return dayKeyToDate(dayKey);
+  private dayKeyToDate(dayKey: string, timeZone: string): Date {
+    return dayKeyToDate(dayKey, timeZone);
   }
 
   private getTodayDayKey(timeZone: string): string {
@@ -1906,7 +2345,7 @@ class XiaomiAdapter {
 
     for (const [mapKey, usageKwh] of roomDayUsage.entries()) {
       const [roomId, dayKey] = mapKey.split(':');
-      const date = this.dayKeyToDate(dayKey);
+      const date = this.dayKeyToDate(dayKey, businessTimeZone);
 
       await prisma.dailyEnergy.upsert({
         where: { roomId_date: { roomId, date } },
@@ -1923,7 +2362,7 @@ class XiaomiAdapter {
       });
     }
 
-    const todayDate = this.dayKeyToDate(todayDayKey);
+    const todayDate = this.dayKeyToDate(todayDayKey, businessTimeZone);
     for (const [roomId, usageKwh] of roomTodayUsage.entries()) {
       await prisma.dailyEnergy.upsert({
         where: { roomId_date: { roomId, date: todayDate } },
@@ -2130,16 +2569,41 @@ class XiaomiAdapter {
       throw new Error('米家登录已建立，但本次没有拉取到任何真实设备。请检查该账号下是否真的已绑定设备，或先完成米家安全验证。');
     }
 
+    const [defaultSite, rooms] = await Promise.all([
+      prisma.site.findFirst({
+        where: { isPrimary: true },
+        select: { id: true },
+        orderBy: { createdAt: 'asc' },
+      }),
+      prisma.room.findMany({
+        select: {
+          id: true,
+          siteId: true,
+        },
+      }),
+    ]);
+    const fallbackSiteId = defaultSite?.id;
+    if (!fallbackSiteId) {
+      throw new Error('系统中尚未配置默认区域，暂时无法同步设备');
+    }
+    const roomSiteMap = new Map(rooms.map((room) => [room.id, room.siteId]));
+
     const now = new Date();
     for (const device of devices) {
       const existing = await prisma.device.findUnique({
         where: { did: device.did },
-        select: { name: true },
+        select: { name: true, siteId: true },
       });
+      const siteId =
+        (device.roomId ? roomSiteMap.get(device.roomId) : null) ??
+        device.siteId ??
+        existing?.siteId ??
+        fallbackSiteId;
 
       await prisma.device.upsert({
         where: { did: device.did },
         update: {
+          siteId,
           name: existing?.name?.trim() || device.name,
           model: device.model,
           roomId: device.roomId,
@@ -2153,6 +2617,7 @@ class XiaomiAdapter {
         },
         create: {
           did: device.did,
+          siteId,
           name: device.name,
           model: device.model,
           roomId: device.roomId,
@@ -2249,6 +2714,7 @@ class XiaomiAdapter {
       await prisma.device.update({
         where: { did: deviceDid },
         data: {
+            status: DeviceStatus.online,
           power: true,
           powerW: confirmed.powerW ?? null,
           currentA: confirmed.currentA ?? null,
@@ -2333,6 +2799,7 @@ class XiaomiAdapter {
       await prisma.device.update({
         where: { did: deviceDid },
         data: {
+            status: DeviceStatus.online,
           power: false,
           powerW: confirmed.powerW ?? 0,
           currentA: confirmed.currentA ?? 0,
@@ -2422,10 +2889,34 @@ class XiaomiAdapter {
 
   public async refreshAllRoomsRealtime(): Promise<void> {
     const devices = await this.fetchDevices();
+    const [defaultSite, rooms] = await Promise.all([
+      prisma.site.findFirst({
+        where: { isPrimary: true },
+        select: { id: true },
+        orderBy: { createdAt: 'asc' },
+      }),
+      prisma.room.findMany({
+        select: {
+          id: true,
+          siteId: true,
+        },
+      }),
+    ]);
+    const fallbackSiteId = defaultSite?.id;
+    if (!fallbackSiteId) {
+      throw new Error('系统中尚未配置默认区域，暂时无法刷新实时数据');
+    }
+    const roomSiteMap = new Map(rooms.map((room) => [room.id, room.siteId]));
+
     for (const device of devices) {
+      const siteId =
+        (device.roomId ? roomSiteMap.get(device.roomId) : null) ??
+        device.siteId ??
+        fallbackSiteId;
       await prisma.device.upsert({
         where: { did: device.did },
         update: {
+          siteId,
           name: device.name,
           model: device.model,
           roomId: device.roomId ?? undefined,
@@ -2439,6 +2930,7 @@ class XiaomiAdapter {
         },
         create: {
           did: device.did,
+          siteId,
           name: device.name,
           model: device.model,
           roomId: device.roomId,
@@ -2478,6 +2970,295 @@ class XiaomiAdapter {
       });
 
     await this.realtimeRefreshPromise;
+  }
+
+  // ──────────────── MiOT Spec Action 通用封装 ────────────────
+
+  public async callDeviceAction(
+    did: string,
+    siid: number,
+    aiid: number,
+    input: any[] = [],
+    scope: XiaomiSessionScope = 'main',
+  ): Promise<any> {
+    const session = await this.getSession(scope);
+    if (!session) {
+      throw new AppError(400, 'XIAOMI_NOT_LOGGED_IN', `米家${scope === 'camera' ? '摄像头区' : ''}未登录，无法调用设备 Action`);
+    }
+    if (/^mock_/.test(session.serviceToken)) {
+      throw new AppError(400, 'XIAOMI_SESSION_INVALID', `当前米家${scope === 'camera' ? '摄像头区' : ''}会话不是真实会话`);
+    }
+    const path = '/app/miotspec/action';
+    const payload = { did, siid, aiid, in: input };
+    const result = await this.requestIo(session, 'POST', path, undefined, payload);
+    return result;
+  }
+
+  // ──────────────── 摄像头 Spec 映射（MBC23 / C300 / C200 等） ────────────────
+
+  private getCameraSpecForModel(model: string): {
+    rtsp: { siid: number; aiid_start: number; aiid_stop?: number };
+    ptz?: { siid: number; aiid_move: number; aiid_stop?: number };
+  } {
+    const m = (model || '').toLowerCase();
+    // Xiaomi Smart Camera C301 (MBC23) - 欧洲区版
+    if (m.includes('mbc23') || m.includes('c301') || m.includes('xiaomi.camera.c301')) {
+      return {
+        rtsp: { siid: 18, aiid_start: 1 },
+        ptz: { siid: 19, aiid_move: 1, aiid_stop: 2 },
+      };
+    }
+    // Xiaomi Outdoor Camera AW200 / AW300
+    if (m.includes('aw200') || m.includes('aw300') || m.includes('aw301')) {
+      return {
+        rtsp: { siid: 18, aiid_start: 1 },
+      };
+    }
+    // Xiaomi Camera C200 (MJSXJ03HL)
+    if (m.includes('mjsxj03hl') || m.includes('c200')) {
+      return {
+        rtsp: { siid: 18, aiid_start: 1 },
+        ptz: { siid: 19, aiid_move: 1, aiid_stop: 2 },
+      };
+    }
+    // Mi Home Security Camera 360° 1080P (MJSXJ05CM / MJSXJ02CM)
+    if (m.includes('mjsxj05cm') || m.includes('mjsxj02cm') || m.includes('2k') || m.includes('360')) {
+      return {
+        rtsp: { siid: 18, aiid_start: 1 },
+        ptz: { siid: 19, aiid_move: 1, aiid_stop: 2 },
+      };
+    }
+    // 默认通用摄像头 Spec（绝大多数小米摄像头统一）
+    return {
+      rtsp: { siid: 18, aiid_start: 1 },
+      ptz: { siid: 19, aiid_move: 1, aiid_stop: 2 },
+    };
+  }
+
+  // ──────────────── 摄像头：开启 / 关闭 RTSP 流 ────────────────
+
+  public async startRTSPStream(
+    did: string,
+    model: string = '',
+    scope: XiaomiSessionScope = 'camera',
+  ): Promise<{
+    streamAddress: string;
+    streamAuthToken: string;
+    rtspUrl: string;
+    rawResult: any;
+  }> {
+    const spec = this.getCameraSpecForModel(model);
+    const raw = await this.callDeviceAction(did, spec.rtsp.siid, spec.rtsp.aiid_start, [], scope);
+    // Xiaomi 返回的结果通常在 {result: {out: [...]}} 或直接是数组
+    let outArr: any[] = [];
+    if (Array.isArray(raw)) outArr = raw;
+    else if (Array.isArray(raw?.out)) outArr = raw.out;
+    else if (Array.isArray(raw?.result?.out)) outArr = raw.result.out;
+    else if (raw && typeof raw === 'object') {
+      const vals = Object.values(raw);
+      const arr = vals.find((v: any) => Array.isArray(v)) as any[] | undefined;
+      if (arr) outArr = arr;
+    }
+    // stream_address / stream_auth_token 在 out 数组的前两项
+    const streamAddress = String(
+      outArr[0] ?? raw?.stream_address ?? raw?.['stream-address'] ?? raw?.address ?? '',
+    ).trim();
+    const streamAuthToken = String(
+      outArr[1] ?? raw?.stream_auth_token ?? raw?.['stream-auth-token'] ?? raw?.token ?? '',
+    ).trim();
+    if (!streamAddress) {
+      console.error('[XiaomiAdapter] startRTSPStream 未解析到 streamAddress，原始返回：', JSON.stringify(raw).slice(0, 800));
+      throw new Error('米家摄像头未返回 stream_address，请确认设备型号与 Spec 映射是否匹配');
+    }
+    // 拼接成带鉴权的 RTSP URL（局域网直连，不走云）
+    let rtspUrl = streamAddress;
+    if (streamAuthToken) {
+      try {
+        const u = new URL(streamAddress);
+        u.username = 'admin';
+        u.password = streamAuthToken;
+        rtspUrl = u.toString();
+      } catch {
+        rtspUrl = streamAddress.includes('rtsp://')
+          ? streamAddress.replace('rtsp://', `rtsp://admin:${encodeURIComponent(streamAuthToken)}@`)
+          : streamAddress;
+      }
+    }
+    return {
+      streamAddress,
+      streamAuthToken,
+      rtspUrl,
+      rawResult: raw,
+    };
+  }
+
+  // ──────────────── 摄像头：云台 PTZ 控制 ────────────────
+
+  public async moveCameraPTZ(
+    did: string,
+    direction: 'left' | 'right' | 'up' | 'down' | 'stop',
+    speed: number = 50,
+    model: string = '',
+    scope: XiaomiSessionScope = 'camera',
+  ): Promise<boolean> {
+    const spec = this.getCameraSpecForModel(model);
+    if (!spec.ptz) {
+      throw new Error(`当前摄像头型号 ${model} 未配置云台 Spec 映射`);
+    }
+    // PTZ move 的 input：
+    // [0] = direction: 0=左,1=右,2=上,3=下, 或用字符串
+    // [1] = speed: 0-100
+    const dirMap: Record<string, number> = { left: 0, right: 1, up: 2, down: 3 };
+    if (direction === 'stop') {
+      const aiid = spec.ptz.aiid_stop ?? spec.ptz.aiid_move;
+      try {
+        await this.callDeviceAction(did, spec.ptz.siid, aiid, [], scope);
+        return true;
+      } catch {
+        await this.callDeviceAction(did, spec.ptz.siid, spec.ptz.aiid_move, [4, 0], scope);
+        return true;
+      }
+    }
+    const dirCode = dirMap[direction];
+    if (dirCode === undefined) throw new Error(`未知云台方向：${direction}`);
+    const speedSafe = Math.max(0, Math.min(100, Number(speed) || 50));
+    await this.callDeviceAction(did, spec.ptz.siid, spec.ptz.aiid_move, [dirCode, speedSafe], scope);
+    return true;
+  }
+
+  // ──────────────── 摄像头区专用：获取摄像头设备列表 ────────────────
+
+  public async fetchCameraDevices(): Promise<XiaomiDeviceInfo[]> {
+    const session = await this.getSession('camera');
+    console.info('[XiaomiAdapter.fetchCameraDevices] 诊断入参：', {
+      hasSession: !!session,
+      region: session?.region ?? null,
+      userId: session?.userId ?? null,
+      mock: session?.serviceToken ? /^mock_/.test(session.serviceToken) : null,
+      apiBase: session ? buildApiBaseUrl(session.region) : null,
+    });
+    if (!session || /^mock_/.test(session.serviceToken)) {
+      return [];
+    }
+    const rooms = await prisma.room.findMany({ select: { id: true, roomNumber: true, name: true } });
+    const listReal: XiaomiDeviceInfo[] = [];
+    const isIntlRegion = !!(session.region && session.region.toLowerCase() !== 'cn');
+    try {
+      const ioPathOptions = isIntlRegion
+        ? ['/home/device_list', '/app/home/device_list']
+        : [DEVICE_LIST_URL.replace(/^https:\/\/api\.io\.mi\.com/, '')];
+      const bodyVariants = isIntlRegion
+        ? [
+          { getVirtualModel: false, getHuamiDevices: 0, getSplitHumanDeviceInfos: 1 },
+          { getVirtualModel: true, getHuamiDevices: 1, getSplitHumanDeviceInfos: 1 },
+          { getVirtualModel: false, getHuamiDevices: 0 },
+        ]
+        : [
+          { getVirtualModel: false, getHuamiDevices: 0 },
+        ];
+      let list: RawDevice[] | null = null;
+      let finalPath: string | null = null;
+      let finalBody: any = null;
+      let finalRaw: any = null;
+      endpointLoop:
+      for (const ioPath of ioPathOptions) {
+        const fullUrl = `${buildApiBaseUrl(session.region)}${ioPath.startsWith('/') ? '' : '/'}${ioPath}`;
+        for (const body of bodyVariants) {
+          console.info('[XiaomiAdapter.fetchCameraDevices] EU 探测尝试：', {
+            region: session.region,
+            ioPath,
+            fullUrl,
+            body,
+          });
+          try {
+            const deviceResponse = (await this.requestIo(session, 'POST', ioPath, undefined, body)) as unknown;
+            const head = JSON.stringify(deviceResponse ?? {}).slice(0, 1500);
+            console.info('[XiaomiAdapter.fetchCameraDevices] EU 探测返回：', { ioPath, body, head });
+            const devicePayload = deviceResponse as {
+              list?: RawDevice[];
+              result?: { list?: RawDevice[]; device_list?: RawDevice[] };
+              device_list?: RawDevice[];
+            } | RawDevice[] | null;
+            const tryList: RawDevice[] | null = Array.isArray(devicePayload)
+              ? devicePayload
+              : Array.isArray(devicePayload?.list) && devicePayload.list.length > 0
+                ? devicePayload.list
+                : Array.isArray(devicePayload?.device_list) && devicePayload.device_list.length > 0
+                  ? devicePayload.device_list
+                  : Array.isArray(devicePayload?.result?.list) && devicePayload.result.list.length > 0
+                    ? devicePayload.result.list
+                    : Array.isArray(devicePayload?.result?.device_list) && devicePayload.result.device_list.length > 0
+                      ? devicePayload.result.device_list
+                      : Array.isArray(devicePayload?.list)
+                        ? devicePayload.list
+                        : Array.isArray(devicePayload?.result?.list)
+                          ? devicePayload.result.list
+                          : Array.isArray(devicePayload?.result?.device_list)
+                            ? devicePayload.result.device_list
+                            : Array.isArray(devicePayload?.device_list)
+                              ? devicePayload.device_list
+                              : null;
+            if (tryList && tryList.length > 0) {
+              list = tryList;
+              finalPath = ioPath;
+              finalBody = body;
+              finalRaw = deviceResponse;
+              break endpointLoop;
+            }
+            if (!list && tryList) {
+              list = tryList;
+              finalPath = ioPath;
+              finalBody = body;
+              finalRaw = deviceResponse;
+            }
+          } catch (probeErr: any) {
+            console.warn('[XiaomiAdapter.fetchCameraDevices] EU 探测失败：', {
+              ioPath, body, msg: probeErr?.message,
+            });
+          }
+        }
+      }
+      console.info('[XiaomiAdapter.fetchCameraDevices] EU 探测完成：', {
+        isIntlRegion,
+        finalPath,
+        finalBody,
+        finalLen: list?.length ?? null,
+        firstDevice: list && list.length > 0
+          ? { did: list[0].did, name: list[0].name, model: list[0].model, isOnline: (list[0] as any).isOnline ?? null }
+          : null,
+        finalRawKeys: finalRaw && typeof finalRaw === 'object' ? Object.keys(finalRaw as Record<string, any>) : null,
+        finalHead: finalRaw ? JSON.stringify(finalRaw).slice(0, 2400) : null,
+      });
+      if (Array.isArray(list) && list.length > 0) {
+        for (let i = 0; i < list.length; i++) {
+          const raw = list[i];
+          const roomId = this.resolveRoomId(rooms, raw);
+          listReal.push({
+            did: raw.did,
+            name: raw.name ?? raw.model ?? `camera_${i + 1}`,
+            model: raw.model ?? 'unknown',
+            online: raw.isOnline === true || raw.status === 1,
+            roomId,
+            localIp: raw.localip,
+            sourceRegion: session?.region || 'de',
+            sourceScope: 'camera',
+          });
+        }
+      }
+    } catch (err: any) {
+      console.warn(
+        '[XiaomiAdapter] fetchCameraDevices 失败：',
+        err?.message,
+        '\n  stack=',
+        err?.stack ?? '',
+      );
+    }
+    return listReal.sort((a, b) => {
+      const aCam = inferDeviceCategory({ name: a.name, model: a.model }) === DeviceCategory.CAMERA ? 0 : 1;
+      const bCam = inferDeviceCategory({ name: b.name, model: b.model }) === DeviceCategory.CAMERA ? 0 : 1;
+      if (aCam !== bCam) return aCam - bCam;
+      return Number(b.online === true) - Number(a.online === true);
+    });
   }
 }
 

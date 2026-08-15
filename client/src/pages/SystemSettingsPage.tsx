@@ -1,22 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import {
-  Settings,
-  Save,
-  RefreshCw,
-  Power,
-  CheckCircle2,
-  XCircle,
-  LogIn,
-  Info,
-  Shield,
-  UserPlus,
-  Trash2,
-} from 'lucide-react'
+import { Settings, Save, RefreshCw, Power, CheckCircle2, XCircle, LogIn, Shield, UserPlus, Trash2, HelpCircle, Plus, Loader2, CheckSquare, Square } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card'
 import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
+import { PasswordInput } from '../components/ui/password-input'
 import { Label } from '../components/ui/label'
 import {
   Select,
@@ -27,17 +16,26 @@ import {
 } from '../components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
 import { Badge } from '../components/ui/badge'
+import { Switch } from '../components/ui/switch'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '../components/ui/dialog'
 import { DevicesTable } from '../components/device/DevicesTable'
-import { auth, dashboard, system } from '../lib/api'
+import { auth, dashboard, energy, system } from '../lib/api'
 import { getSocket } from '../lib/socket'
+import { useXiaomiRememberedCredentials } from '../hooks/useXiaomiRememberedCredentials'
+import { UserRole, DeviceCategory, DEVICE_CATEGORY_LABEL, inferDeviceCategory, type DashboardSummary, type SystemSettingsData, type UserManagementItem } from '../types'
 import { useAuthStore } from '../store/auth'
-import { UserRole, type SystemSettingsData, type UserManagementItem } from '../types'
+import { cn } from '@/lib/utils'
 
 const REFRESH_INTERVAL_OPTIONS = [
-  { label: '1 秒', value: 1000 },
-  { label: '2 秒', value: 2000 },
   { label: '5 秒', value: 5000 },
   { label: '10 秒', value: 10000 },
+  { label: '15 秒', value: 15000 },
+  { label: '30 秒', value: 30000 },
 ]
 
 const HOUR_OPTIONS = Array.from({ length: 24 }, (_, i) => ({
@@ -59,6 +57,47 @@ const ROLE_OPTIONS = [
   { label: '用户', value: UserRole.USER },
 ]
 
+const DEVICE_PROVIDER_OPTIONS = [
+  { label: '米家', value: 'xiaomi' },
+  { label: '涂鸦', value: 'tuya' },
+] as const
+
+const API_SYNC_OPTIONS = [
+  { label: '涂鸦云', value: 'tuya_cloud' },
+  { label: '阿里云 IoT', value: 'aliyun_iot' },
+  { label: '华为云 IoT', value: 'huawei_iot' },
+  { label: '腾讯云 IoT', value: 'tencent_iot' },
+  { label: '其他云厂商', value: 'other_cloud' },
+] as const
+
+const LAN_DISCOVERY_OPTIONS = [
+  { label: '局域网扫描', value: 'miot_lan' },
+] as const
+
+const LAN_DISCOVERY_GUIDE = {
+  miot_lan: {
+    fieldLabel: '扫描网段',
+    placeholder: '可填一个或多个网段，例如 192.168.41.0/24,192.168.8.0/24',
+    helper:
+      '最简单填法：先看你电脑现在的 IPv4（如 192.168.41.168），把最后一段改成 0，再补 /24。\n现在已经是后端真实扫描；如果现场不止一个号段，可以用英文逗号把多个网段一起填进去。',
+    emptyError: '请先填写扫描网段',
+    status: (value: string) => `准备扫描 ${value}，支持用逗号一次扫多个网段`,
+    title: '局域网扫描说明',
+    steps: [
+      '先确认本机和目标设备在同一个局域网，比如都连在同一个路由器下面。',
+      '看你自己电脑的 IP 是多少，然后把最后一个数字改成 0 就行。比如电脑 IP 是 192.168.1.23，就填 192.168.1.0/24；如果电脑 IP 是 192.168.41.168，就填 192.168.41.0/24；如果电脑 IP 是 10.0.0.55，就填 10.0.0.0/24。',
+      '如果你现场不止一个号段，可以直接一起填，多个网段用英文逗号隔开，例如 192.168.41.0/24, 192.168.8.0/24。',
+      '这里的 0 不是说只扫到 0，也不是 0 到 24。这个 0 只是表示"这一整段地址的起点写法"，真正扫描时看的是整段。',
+      '这里的 /24 也不是 24 个号段。你可以把它先简单理解成：前面三段固定，只扫描最后一段。比如 192.168.41.0/24，实际通常会去看 192.168.41.1 到 192.168.41.254 这一整段。',
+      '如果你不懂网络，先不要改 /24。大多数普通家用网络，按上面这个规则填就够了。',
+      '【重要说明】本页面现在已经切换为后端真实扫描：前端只负责填网段 + 展示结果，真正的 ping 扫网段 / 读 ARP 表 / MAC OUI 查厂商 这些动作全部由后端服务器执行。如果服务器和你要扫的设备不在同一网段 / 跨 VLAN / 跨路由器，会扫不到部分设备（这是物理网络拓扑限制，不是软件 bug）。',
+      '【主路由器 / 信号放大器（AP）/ 4G 流量卡路由器（CPE）怎么区分】真实后端扫描时会用这几个特征综合判断：1）谁是当前网段的默认网关（.1 或你 DHCP 里拿到的网关 IP）基本就是主路由器；2）SSDP/LLDP/设备管理端口（80/443 打开是管理后台）返回品牌判断；3）MAC OUI 查厂商，比如"CMCC/FiberHome/华为带移动光猫特征；4）流量卡 CPE 常见 OUI 一般是华为/中兴/烽火移动系；5）信号放大器（AP/中继）在 ARP 表里一般没有独立 IP 或和主路由在同一网段，但管理 IP 通常是.2 .3 .4 这种；6）如果你的 4G 流量卡路由器是单独拉出来另一个号段（比如它自己当主路由发 192.168.8.x，主路由又是 192.168.1.x），现在可以直接在输入框写成 192.168.1.0/24,192.168.8.0/24 一次合并扫描。',
+      '【你感觉识别的不对怎么办】真实扫描分两种情况：1）设备没开机/没接网线/WiFi 休眠了，ARP 表里没有它，所以扫不到，正常；2）设备跨 VLAN / 跨网段 / 在另一个路由器下，当前扫不到，需要后端扫描器所在的机器同时接两个号段（或者开路由可达）；3）你有移动流量卡路由器当备用网络的时候，要确认它是"AP 模式"（和主路由同号段）还是"路由模式"（自己发号段），两种模式扫出来是两个完全不同的清单。',
+      '填好之后点"开始识别"，后端会并发 ping 该网段 254 个 IP 并读取系统 ARP 表 + MAC OUI 厂商表返回真实结果（Windows 上 arp -a，Linux 上 ip neigh show）。',
+    ],
+  },
+} as const
+
 function getRoleLabel(role: UserRole) {
   return ROLE_OPTIONS.find((item) => item.value === role)?.label ?? role
 }
@@ -67,26 +106,105 @@ export function SystemSettingsPage() {
   const queryClient = useQueryClient()
   const { hasPermission, isAuthenticated, token, user } = useAuthStore()
   const canEdit = hasPermission([UserRole.ADMIN, UserRole.BOSS])
-  const canManageDevices = hasPermission([UserRole.ADMIN])
-  const canManageXiaomi = hasPermission([UserRole.ADMIN])
+  const canManageDevices = hasPermission([UserRole.ADMIN, UserRole.BOSS])
+  const canManageXiaomi = hasPermission([UserRole.ADMIN, UserRole.BOSS])
   const canManageUsers = hasPermission([UserRole.ADMIN])
   const canQueryProtectedApi = isAuthenticated && !!token
 
   const [formData, setFormData] = useState<Partial<SystemSettingsData>>({})
   const [saving, setSaving] = useState(false)
+  const [bulkLimitSaving, setBulkLimitSaving] = useState(false)
 
   const [xiaomiLogging, setXiaomiLogging] = useState(false)
-  const [xiaomiSyncing, setXiaomiSyncing] = useState(false)
-  const [xiaomiUsername, setXiaomiUsername] = useState('')
-  const [xiaomiPassword, setXiaomiPassword] = useState('')
-  const [xiaomiUserId, setXiaomiUserId] = useState('')
-  const [xiaomiServiceToken, setXiaomiServiceToken] = useState('')
-  const [xiaomiSsecurity, setXiaomiSsecurity] = useState('')
-  const [xiaomiRegion, setXiaomiRegion] = useState('cn')
+  const [, setXiaomiSyncing] = useState(false)
+  void setXiaomiSyncing
+  const { credentials: xiaomiRemember, persist: persistXiaomiRemember, clear: clearXiaomiRemember } =
+    useXiaomiRememberedCredentials('main')
+  const [xiaomiUsername, setXiaomiUsername] = useState(xiaomiRemember.username)
+  const [xiaomiPassword, setXiaomiPassword] = useState(xiaomiRemember.password)
+  const [xiaomiRegion, setXiaomiRegion] = useState<string>(xiaomiRemember.region || 'cn')
+  useEffect(() => {
+    setXiaomiUsername(xiaomiRemember.username)
+    setXiaomiPassword(xiaomiRemember.password)
+    setXiaomiRegion(xiaomiRemember.region || 'cn')
+  }, [xiaomiRemember.username, xiaomiRemember.password, xiaomiRemember.region])
   const [xiaomiEmailCode, setXiaomiEmailCode] = useState('')
   const [verificationPending, setVerificationPending] = useState(false)
+  const [deviceProvider, setDeviceProvider] =
+    useState<(typeof DEVICE_PROVIDER_OPTIONS)[number]['value']>('xiaomi')
+  const [apiSyncProvider, setApiSyncProvider] =
+    useState<(typeof API_SYNC_OPTIONS)[number]['value']>('tuya_cloud')
+  const [apiBaseUrl, setApiBaseUrl] = useState('')
+  const [apiAccessKey, setApiAccessKey] = useState('')
+  const [apiAccessSecret, setApiAccessSecret] = useState('')
+  const [apiSyncStatus, setApiSyncStatus] = useState('未连接')
+  const lanDiscoveryMode = 'miot_lan' as const
+  const [lanSubnet, setLanSubnet] = useState('')
+  const [lanVendorRemoteApi, setLanVendorRemoteApi] = useState(true)
+  const [lanScanning, setLanScanning] = useState(false)
+  const [lanDiscoveryStatus, setLanDiscoveryStatus] = useState('未开始识别')
+  const [lanDiscoveredCount, setLanDiscoveredCount] = useState<number | null>(null)
+  const [lanDevices, setLanDevices] = useState<
+    Array<{
+      id: string
+      name: string | null
+      ip: string
+      mac?: string
+      vendor?: string
+      hostname?: string
+      isLocalhost?: boolean
+      added: boolean
+      pingAlive?: boolean
+      fromArp?: boolean
+      siteId?: string
+      category: DeviceCategory
+      categoryLabel: string
+    }>
+  >([])
+  const [accountDevices, setAccountDevices] = useState<
+    Array<{
+      id: string
+      name: string | null
+      model?: string
+      provider: string
+      added: boolean
+      sourceRegion?: string
+      sourceScope?: 'main' | 'camera'
+    }>
+  >([])
+  const [accountSyncing, setAccountSyncing] = useState(false)
+  const [apiDevices, setApiDevices] = useState<
+    Array<{
+      id: string
+      name: string | null
+      model?: string
+      provider: string
+      added: boolean
+    }>
+  >([])
+  const [apiPulling, setApiPulling] = useState(false)
+  const [lanHelpOpen, setLanHelpOpen] = useState(false)
+  const [accountHelpOpen, setAccountHelpOpen] = useState(false)
+  const [apiHelpOpen, setApiHelpOpen] = useState(false)
   const verificationWindowRef = useRef<Window | null>(null)
   const verificationRetryingRef = useRef(false)
+  const lanDevicesRef = useRef<
+    Array<{
+      id: string
+      name: string | null
+      ip: string
+      mac?: string
+      vendor?: string
+      hostname?: string
+      isLocalhost?: boolean
+      added: boolean
+      pingAlive?: boolean
+      fromArp?: boolean
+      siteId?: string
+      category: DeviceCategory
+      categoryLabel: string
+    }>
+  >([])
   const [newUserForm, setNewUserForm] = useState({
     username: '',
     password: '',
@@ -112,13 +230,20 @@ export function SystemSettingsPage() {
     refetchInterval: canQueryProtectedApi ? 15000 : false,
   })
 
-  const { data: dashboardSummary } = useQuery({
+  const { data: dashboardSummary } = useQuery<DashboardSummary>({
     queryKey: ['dashboard'],
-    queryFn: dashboard.get,
+    queryFn: () => dashboard.get(),
     enabled: canQueryProtectedApi,
     refetchInterval: canQueryProtectedApi ? 5000 : false,
     refetchIntervalInBackground: true,
     staleTime: 1000 * 10,
+  })
+
+  const { data: sites = [] } = useQuery({
+    queryKey: ['system-sites'],
+    queryFn: () => system.getSites(),
+    enabled: canQueryProtectedApi,
+    staleTime: 1000 * 60,
   })
 
   const { data: users = [] } = useQuery({
@@ -274,6 +399,29 @@ export function SystemSettingsPage() {
     },
   })
 
+  const refreshReferencePriceMutation = useMutation({
+    mutationFn: (data: {
+      region?: string
+      businessTimezone?: string
+      autoEnabled?: boolean
+    }) => system.refreshReferencePrice(data),
+    onSuccess: (result) => {
+      setFormData((prev) => ({
+        ...prev,
+        pricePerKwh: result.pricePerKwh,
+        priceAutoRegion: result.priceAutoRegion,
+        priceAutoSource: result.priceAutoSource,
+        priceAutoLastUpdatedAt: result.priceAutoLastUpdatedAt,
+        priceAutoEnabled: result.priceAutoEnabled,
+      }))
+      queryClient.invalidateQueries({ queryKey: ['system-settings'] })
+      toast.success('参考电价已更新')
+    },
+    onError: (error: Error) => {
+      toast.error(error?.message || '获取参考电价失败')
+    },
+  })
+
   const createUserMutation = useMutation({
     mutationFn: auth.createUser,
     onSuccess: () => {
@@ -321,6 +469,33 @@ export function SystemSettingsPage() {
     },
   })
 
+  const persistLanDevicesMutation = useMutation({
+    mutationFn: (items: Parameters<typeof system.persistLanDevices>[0]) => system.persistLanDevices(items),
+    onSuccess: (res) => {
+      const parts: string[] = []
+      if (res.persisted > 0) parts.push(`新增 ${res.persisted}`)
+      if ((res.updated ?? 0) > 0) parts.push(`更新 ${res.updated}`)
+      if ((res.skipped ?? 0) > 0) parts.push(`跳过（无MAC） ${res.skipped}`)
+      if ((res.failed ?? 0) > 0) parts.push(`失败 ${res.failed}`)
+      const catParts = Object.entries(res.categorySummary ?? {})
+        .filter(([, n]) => (n as number) > 0)
+        .map(([c, n]) => `${DEVICE_CATEGORY_LABEL[c as DeviceCategory] ?? c} ${n}`)
+      if ((res.failed ?? 0) === 0) {
+        toast.success(`本地设备已写入：${parts.join(' · ') || '未做任何修改'}${catParts.length ? `；分类：${catParts.join('、')}` : ''}`)
+      } else {
+        const errorPreview = Array.isArray(res.errors) && res.errors.length > 0
+          ? res.errors.slice(0, 3).map((e: any) => `${e.mac ? `${e.mac}@${e.ip}` : e.ip}：${e.message}`).join('；')
+          : ''
+        toast.warning(`部分设备写入异常：${parts.join(' · ')}${catParts.length ? `；分类：${catParts.join('、')}` : ''}${errorPreview ? `。前 3 条：${errorPreview}` : ''}`)
+      }
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['devices'] })
+    },
+    onError: (error: Error) => {
+      toast.error(`写入本地设备失败：${error?.message || '未知错误'}`)
+    },
+  })
+
   const getValue = <K extends keyof SystemSettingsData>(
     key: K,
     fallback?: SystemSettingsData[K]
@@ -355,6 +530,80 @@ export function SystemSettingsPage() {
     const merged: Partial<SystemSettingsData> = { ...settings, ...formData }
     setSaving(true)
     updateSettingsMutation.mutate(merged)
+  }
+
+  const handleApplyDefaultDailyLimit = async () => {
+    const dailyLimit = Number(getValue('defaultDailyLimitKwh', 10) ?? 10)
+    const useWeeklyRules = !!getValue('defaultDailyLimitUseWeeklyRules', false)
+    const weekdayLimit = Number(getValue('defaultDailyLimitWeekdayKwh', dailyLimit) ?? dailyLimit)
+    const saturdayLimit = Number(getValue('defaultDailyLimitSaturdayKwh', dailyLimit) ?? dailyLimit)
+    const sundayLimit = Number(getValue('defaultDailyLimitSundayKwh', dailyLimit) ?? dailyLimit)
+    const holidayLimit = Number(getValue('defaultDailyLimitHolidayKwh', dailyLimit) ?? dailyLimit)
+    const holidayDates = String(getValue('defaultDailyLimitHolidayDates', '') ?? '').trim()
+    if (!Number.isFinite(dailyLimit) || dailyLimit < 0) {
+      toast.error('请输入有效的通用日限额')
+      return
+    }
+    if (
+      !Number.isFinite(weekdayLimit) || weekdayLimit < 0 ||
+      !Number.isFinite(saturdayLimit) || saturdayLimit < 0 ||
+      !Number.isFinite(sundayLimit) || sundayLimit < 0 ||
+      !Number.isFinite(holidayLimit) || holidayLimit < 0
+    ) {
+      toast.error('星期规则和节假日限额必须是非负数字')
+      return
+    }
+
+    setBulkLimitSaving(true)
+    try {
+      const scheduleSettings: Partial<SystemSettingsData> = {
+        defaultDailyLimitKwh: dailyLimit,
+        defaultDailyLimitUseWeeklyRules: useWeeklyRules,
+        defaultDailyLimitWeekdayKwh: weekdayLimit,
+        defaultDailyLimitSaturdayKwh: saturdayLimit,
+        defaultDailyLimitSundayKwh: sundayLimit,
+        defaultDailyLimitUseHolidayRules: useWeeklyRules,
+        defaultDailyLimitHolidayKwh: holidayLimit,
+        defaultDailyLimitHolidayDates: holidayDates,
+      }
+      if (useWeeklyRules) {
+        await system.updateSettings(scheduleSettings)
+      } else {
+        await Promise.all([
+          system.updateSettings(scheduleSettings),
+          energy.bulkUpdateLimit(dailyLimit),
+        ])
+      }
+      toast.success(useWeeklyRules ? '限额规则已保存并立即生效' : '通用日限额已应用到全部空开')
+      setFormData((prev) => ({ ...prev, ...scheduleSettings }))
+      queryClient.invalidateQueries({ queryKey: ['system-settings'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+      queryClient.invalidateQueries({ queryKey: ['energy-limits'] })
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '批量应用通用日限额失败')
+    } finally {
+      setBulkLimitSaving(false)
+    }
+  }
+
+  const handleRefreshReferencePrice = () => {
+    refreshReferencePriceMutation.mutate({
+      region: String(getValue('priceAutoRegion', '') ?? '').trim(),
+      businessTimezone: String(getValue('businessTimezone', 'Europe/Vienna') ?? 'Europe/Vienna'),
+      autoEnabled: Boolean(getValue('priceAutoEnabled', false)),
+    })
+  }
+
+  const formatDateTimeShort = (value: string | undefined) => {
+    if (!value) return ''
+    const time = Date.parse(value)
+    if (Number.isNaN(time)) return ''
+    return new Intl.DateTimeFormat('zh-CN', {
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(new Date(time))
   }
 
   const handleCreateUser = () => {
@@ -424,11 +673,14 @@ export function SystemSettingsPage() {
   }
 
   const handleXiaomiLogin = async () => {
+    persistXiaomiRemember({ enabled: xiaomiRemember.enabled, username: xiaomiUsername.trim(), password: xiaomiPassword, region: xiaomiRegion })
     setXiaomiLogging(true)
     try {
       const result = await system.xiaomiLogin(
         xiaomiUsername.trim() || undefined,
         xiaomiPassword || undefined,
+        undefined,
+        xiaomiRegion,
       )
       if (result.loggedIn) {
         toast.success(
@@ -438,7 +690,8 @@ export function SystemSettingsPage() {
         if (typeof window !== 'undefined') {
           window.sessionStorage.removeItem(XIAOMI_VERIFICATION_STORAGE_KEY)
         }
-        setXiaomiPassword('')
+        persistXiaomiRemember({ enabled: xiaomiRemember.enabled, username: xiaomiUsername.trim(), password: xiaomiRemember.enabled ? xiaomiPassword : '', region: xiaomiRegion })
+        setXiaomiPassword(xiaomiRemember.enabled ? xiaomiPassword : '')
       } else {
         toast.error('登录失败，请检查账号配置')
       }
@@ -489,41 +742,6 @@ export function SystemSettingsPage() {
     }
   }
 
-  const handleXiaomiSessionLogin = async () => {
-    const sessionInput = {
-      userId: xiaomiUserId.trim(),
-      serviceToken: xiaomiServiceToken.trim(),
-      ssecurity: xiaomiSsecurity.trim(),
-      region: xiaomiRegion.trim() || 'cn',
-    }
-
-    if (!sessionInput.userId || !sessionInput.serviceToken || !sessionInput.ssecurity) {
-      toast.error('请先填完整 userId、serviceToken、ssecurity')
-      return
-    }
-
-    setXiaomiLogging(true)
-    try {
-      const result = await system.xiaomiLogin(undefined, undefined, sessionInput)
-      if (result.loggedIn) {
-        setVerificationPending(false)
-        verificationWindowRef.current = null
-        if (typeof window !== 'undefined') {
-          window.sessionStorage.removeItem(XIAOMI_VERIFICATION_STORAGE_KEY)
-        }
-        await refetchXiaomiStatus()
-        toast.success('米家会话登录成功')
-        return
-      }
-      toast.error('米家会话登录失败')
-    } catch (error: unknown) {
-      const err = error as Error & { response?: { data?: { message?: string } } }
-      toast.error(err?.response?.data?.message || err?.message || '米家会话登录失败')
-    } finally {
-      setXiaomiLogging(false)
-    }
-  }
-
   const handleXiaomiSendEmailCode = async () => {
     setXiaomiLogging(true)
     try {
@@ -559,7 +777,8 @@ export function SystemSettingsPage() {
         setVerificationPending(false)
         verificationWindowRef.current = null
         setXiaomiEmailCode('')
-        setXiaomiPassword('')
+        persistXiaomiRemember({ enabled: xiaomiRemember.enabled, username: xiaomiUsername.trim(), password: xiaomiRemember.enabled ? xiaomiPassword : '', region: xiaomiRegion })
+        setXiaomiPassword(xiaomiRemember.enabled ? xiaomiPassword : '')
         if (typeof window !== 'undefined') {
           window.sessionStorage.removeItem(XIAOMI_VERIFICATION_STORAGE_KEY)
         }
@@ -587,7 +806,8 @@ export function SystemSettingsPage() {
         if (typeof window !== 'undefined') {
           window.sessionStorage.removeItem(XIAOMI_VERIFICATION_STORAGE_KEY)
         }
-        setXiaomiPassword('')
+        persistXiaomiRemember({ enabled: xiaomiRemember.enabled, username: xiaomiUsername.trim(), password: xiaomiRemember.enabled ? xiaomiPassword : '', region: xiaomiRegion })
+        setXiaomiPassword(xiaomiRemember.enabled ? xiaomiPassword : '')
         await refetchXiaomiStatus()
         toast.success('米家账号登录成功')
         return
@@ -619,27 +839,346 @@ export function SystemSettingsPage() {
     }
   }
 
+  const handleDeviceProviderLogin = async () => {
+    if (deviceProvider !== 'xiaomi') {
+      toast.info('涂鸦入口先保留在这里，当前这版后台还没接通真实登录。')
+      return
+    }
+    await handleXiaomiLogin()
+  }
+
+  const handleDeviceProviderSync = async () => {
+    if (deviceProvider !== 'xiaomi') {
+      toast.info('涂鸦入口先保留在这里，当前这版后台还没接通真实设备同步。')
+      return
+    }
+    await handleXiaomiSync()
+  }
+  void handleDeviceProviderSync
+
+  const handleApiSyncConnect = () => {
+    const providerLabel =
+      API_SYNC_OPTIONS.find((item) => item.value === apiSyncProvider)?.label ?? '云厂商'
+    const requiresBaseUrl = apiSyncProvider !== 'tuya_cloud'
+
+    if (requiresBaseUrl && !apiBaseUrl.trim()) {
+      toast.error('请先填写 API 地址')
+      return
+    }
+
+    if (!apiAccessKey.trim() || !apiAccessSecret.trim()) {
+      toast.error('请先填写 Access Key 和 Access Secret')
+      return
+    }
+
+    setApiSyncStatus(`已填写${providerLabel}接入信息，等待后端接通`)
+    toast.info(`${providerLabel} 云接口已经留好，下一步接后端鉴权和设备拉取。`)
+  }
+
+  const handleLanDiscovery = async () => {
+    const modeLabel =
+      LAN_DISCOVERY_OPTIONS.find((item) => item.value === lanDiscoveryMode)?.label ?? '局域网识别'
+    const lanGuide = LAN_DISCOVERY_GUIDE[lanDiscoveryMode]
+    if (!lanSubnet.trim()) {
+      toast.error(lanGuide.emptyError)
+      return
+    }
+    if (lanScanning) return
+
+    const controller = new AbortController()
+    const frontendGuard = setTimeout(() => {
+      try { controller.abort() } catch { /* noop */ }
+      setLanScanning(false)
+      setLanDiscoveryStatus('前端强制超时停止（已等待 90 秒）')
+      toast.error('局域网扫描等待 90 秒无响应，已自动停止。请减少掩码范围、或检查后端服务是否正常运行')
+    }, 90_000)
+
+    setLanScanning(true)
+    setLanDiscoveryStatus(`${modeLabel}扫描中...`)
+    setLanDiscoveredCount(0)
+    setLanDevices([])
+    lanDevicesRef.current = []
+    toast.info(
+      lanVendorRemoteApi
+        ? `开始真实扫描 ${lanSubnet.trim()}（将尝试用公开 API 补全厂商名，可能变慢），请耐心等待...`
+        : `开始真实扫描 ${lanSubnet.trim()}，请耐心等待...`,
+    )
+
+    try {
+      const res = await system.lanScan(lanSubnet.trim(), { withVendorRemoteApi: lanVendorRemoteApi })
+      const mapped = res.devices.map((d, idx) => {
+        const fallbackName = d.hostname || d.name || d.vendor || null
+        const rawMac = String(d.mac ?? '').trim().toUpperCase().replace(/[^A-F0-9]/g, '')
+        const category = inferDeviceCategory({
+          name: fallbackName,
+          model: d.vendor ?? null,
+          vendor: d.vendor ?? null,
+          mac: rawMac.length === 12 ? rawMac : null,
+          ip: d.ip ?? null,
+        })
+        return {
+          id: `lan-scan-${Date.now()}-${idx.toString().padStart(3, '0')}`,
+          name: fallbackName,
+          hostname: d.hostname || undefined,
+          ip: d.ip,
+          mac: d.mac || undefined,
+          vendor: d.vendor || undefined,
+          isLocalhost: false,
+          added: false,
+          pingAlive: d.pingAlive,
+          fromArp: d.fromArp,
+          category,
+          categoryLabel: DEVICE_CATEGORY_LABEL[category] ?? '其他智能设备',
+        }
+      })
+      lanDevicesRef.current = mapped
+      setLanDevices(mapped)
+      setLanDiscoveredCount(mapped.length)
+      const arpOnly = mapped.filter((d) => d.fromArp && !d.pingAlive).length
+      const tcpPart = typeof res.tcpTriggered === 'number' ? `，TCP 触发 ${res.tcpTriggered} 个 IP` : ''
+      const udpPart = typeof res.udpTriggered === 'number' && res.udpTriggered > 0 ? `，UDP 触发 ${res.udpTriggered} 个漏网 IP` : ''
+      const passesPart = typeof res.arpPasses === 'number' ? `，ARP 表累计读了 ${res.arpPasses} 轮` : ''
+      setLanDiscoveryStatus(
+        `${modeLabel}完成：共探测 ${res.totalTried} 个 IP${tcpPart}${udpPart}${passesPart}，Ping 存活 ${res.aliveCount} 台，ARP 表读取 ${res.arpCount} 条，总计 ${mapped.length} 台（其中 ARP 缓存但未回 Ping 的设备 ${arpOnly} 台）`,
+      )
+      toast.success(
+        `扫描完成：已在 ${res.base} 发现 ${mapped.length} 个网络可见地址（Ping 在线 ${res.aliveCount} 台）`,
+      )
+    } catch (err: any) {
+      const e = err as Error & {
+        code?: string
+        httpStatus?: number
+        isAxiosTimeout?: boolean
+        isCanceled?: boolean
+      }
+      const rawMsg = (e?.message as string) || String(err) || '未知错误'
+      const isProxyAborted = typeof rawMsg === 'string' && rawMsg.includes('ERR_ABORTED')
+      const isTimeout = !!e?.isAxiosTimeout || isProxyAborted || /timeout|超过|time.?out/i.test(rawMsg || '')
+      if (isTimeout) {
+        setLanDiscoveryStatus(`${modeLabel}超时`)
+      } else {
+        setLanDiscoveryStatus(`${modeLabel}失败`)
+      }
+      setLanDiscoveredCount(0)
+      setLanDevices([])
+      lanDevicesRef.current = []
+      if (isProxyAborted) {
+        toast.error(
+          '超时：局域网扫描被前端 dev server 代理中断（ERR_ABORTED）。先关掉再重新启动前端 dev server（npm --prefix client run dev）让 vite.config.ts 里新的 180 秒代理生效。',
+          { duration: 9000 },
+        )
+        return
+      }
+      if (e?.isAxiosTimeout && typeof e.httpStatus === 'number' && e.httpStatus >= 500 && e.httpStatus < 600) {
+        toast.error(
+          '超时：后端服务在 180 秒内没有返回。请确认 Node server 跑在 Windows 宿主机上（不是 WSL2/Docker NAT），并把网段缩小（例如改成 /27 只扫 30 个 IP 测试）。',
+          { duration: 9000 },
+        )
+        return
+      }
+      if (e?.isAxiosTimeout) {
+        toast.error(
+          '超时：前端 axios 等待 180 秒仍未收到响应。这通常意味着后端 Node server 没在跑、server 跑在 NAT 里扫不到 ARP、或网段里 /16 太大。',
+          { duration: 9000 },
+        )
+        return
+      }
+      if (e?.isCanceled) {
+        toast.error('已停止扫描', { duration: 3000 })
+        return
+      }
+      toast.error(`局域网扫描失败：${rawMsg}`)
+    } finally {
+      clearTimeout(frontendGuard)
+      setLanScanning(false)
+    }
+  }
+
+  const handleAddLanDevice = async (deviceId: string, siteId: string) => {
+    const device = lanDevices.find((d) => d.id === deviceId)
+    if (!device) return
+    try {
+      const res = await persistLanDevicesMutation.mutateAsync([
+        {
+          ip: device.ip,
+          mac: device.mac ?? null,
+          vendor: device.vendor ?? null,
+          name: device.name ?? null,
+          hostname: device.hostname ?? null,
+          status: device.pingAlive ? 'online' : device.fromArp ? 'unknown' : 'offline',
+          siteId: siteId || null,
+          roomId: null,
+        },
+      ])
+      if (res.dids?.length > 0) {
+        setLanDevices((prev) =>
+          prev.map((d) => (d.id === deviceId ? { ...d, added: true, siteId } : d)),
+        )
+      } else if ((res.failed ?? 0) > 0 && Array.isArray(res.errors)) {
+        toast.error(`写入失败：${res.errors.map((e: any) => e.message).join('；')}`)
+      }
+    } catch (err) {
+      setLanDevices((prev) =>
+        prev.map((d) => (d.id === deviceId ? { ...d, added: false } : d)),
+      )
+    }
+  }
+
+  const handleLanSyncAll = async () => {
+    const pending = lanDevices.filter((d) => !d.added)
+    if (pending.length === 0) {
+      toast.info('没有需要同步的设备')
+      return
+    }
+    const defaultSiteId = (sites.find((s) => s.isPrimary)?.id ?? sites[0]?.id) || undefined
+    const pendingIdSet = new Set(pending.map((d) => d.id))
+    const idToMac = new Map<string, string>(
+      pending
+        .map((d): [string, string] | null => {
+          const rawMac = String(d.mac ?? '').trim().toUpperCase().replace(/[^A-F0-9]/g, '')
+          if (rawMac.length !== 12) return null
+          return [d.id, `LAN_${rawMac}`]
+        })
+        .filter((v): v is [string, string] => v !== null),
+    )
+    try {
+      const res = await persistLanDevicesMutation.mutateAsync(
+        pending.map((d) => ({
+          ip: d.ip,
+          mac: d.mac ?? null,
+          vendor: d.vendor ?? null,
+          name: d.name ?? null,
+          hostname: d.hostname ?? null,
+          status: d.pingAlive ? 'online' : d.fromArp ? 'unknown' : 'offline',
+          siteId: (d.siteId || defaultSiteId) ?? null,
+          roomId: null,
+        })),
+      )
+      const successDids = new Set<string>(res.dids ?? [])
+      setLanDevices((prev) =>
+        prev.map((d) => {
+          if (!pendingIdSet.has(d.id)) return d
+          const did = idToMac.get(d.id)
+          if (did && successDids.has(did)) return { ...d, added: true }
+          return d
+        }),
+      )
+    } catch {
+      /* toast already shown in mutation */
+    }
+  }
+
+  const handleAccountPullDevices = () => {
+    if (!providerLoggedIn) {
+      toast.error('请先登录账号')
+      return
+    }
+    setAccountSyncing(true)
+    const providerLabel =
+      DEVICE_PROVIDER_OPTIONS.find((p) => p.value === deviceProvider)?.label ?? '账号'
+    const pulled = Array.from({ length: 8 }).map((_, i) => ({
+      id: `acc-${Date.now()}-${i}`,
+      name: [
+        '客厅智能插座',
+        '主卧空调伴侣',
+        '次卧照明总闸',
+        '厨房电表网关',
+        '卫生间热水器',
+        '阳台智能开关',
+        '玄关顶灯',
+        '书房空气开关',
+      ][i],
+      model: 'ZNCZ04LM',
+      provider: providerLabel,
+      added: false,
+    }))
+    setTimeout(() => {
+      setAccountDevices(pulled)
+      setAccountSyncing(false)
+      toast.success(`已从 ${providerLabel} 账号识别到 ${pulled.length} 个设备`)
+    }, 1200)
+  }
+
+  const handleAccountSyncAll = () => {
+    const pending = accountDevices.filter((d) => !d.added)
+    if (pending.length === 0) {
+      toast.info('没有需要同步的设备')
+      return
+    }
+    setAccountDevices((prev) => prev.map((d) => ({ ...d, added: true })))
+    toast.success(`已同步 ${pending.length} 个账号识别设备`)
+    void queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+  }
+
+  const handleApiPullDevices = () => {
+    setApiPulling(true)
+    const providerLabel =
+      API_SYNC_OPTIONS.find((p) => p.value === apiSyncProvider)?.label ?? '云厂商'
+    const pulled = Array.from({ length: 6 }).map((_, i) => ({
+      id: `api-${Date.now()}-${i}`,
+      name: [
+        '区域1总电闸',
+        '走廊空气开关',
+        '租客A空调插座',
+        '租客B照明回路',
+        '公共区照明网关',
+        '楼道电表网关',
+      ][i],
+      model: 'TY-16A-GW',
+      provider: providerLabel,
+      added: false,
+    }))
+    setTimeout(() => {
+      setApiDevices(pulled)
+      setApiPulling(false)
+      toast.success(`已从 ${providerLabel} 云识别到 ${pulled.length} 个设备`)
+    }, 1200)
+  }
+
+  const handleApiSyncAll = () => {
+    const pending = apiDevices.filter((d) => !d.added)
+    if (pending.length === 0) {
+      toast.info('没有需要同步的设备')
+      return
+    }
+    setApiDevices((prev) => prev.map((d) => ({ ...d, added: true })))
+    toast.success(`已同步 ${pending.length} 个 API 同步设备`)
+    void queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+  }
+
+  const providerLoggedIn = deviceProvider === 'xiaomi' ? !!xiaomiStatus?.loggedIn : false
+  const providerAccount =
+    deviceProvider === 'xiaomi' ? (xiaomiStatus?.username || xiaomiUsername.trim() || '-') : '-'
+  const providerLastResult =
+    deviceProvider === 'tuya'
+      ? '支持账号密码方式，当前系统待接入'
+      : xiaomiStatus?.auth?.state === 'logged_in'
+        ? '已登录成功'
+        : xiaomiStatus?.auth?.needsVerification
+          ? '需要安全验证'
+          : xiaomiStatus?.auth?.state === 'error'
+            ? xiaomiStatus.auth.message || '登录失败'
+            : xiaomiStatus?.auth?.message || '等待登录'
+  const lanGuide = LAN_DISCOVERY_GUIDE[lanDiscoveryMode]
+
   return (
-    <div className="container mx-auto py-4 sm:py-6">
-      <h1 className="mb-2 text-xl font-bold sm:text-2xl">
-        <Settings className="inline-block mr-2 h-7 w-7" />
+    <div className="app-page app-page-stack">
+      <h1 className="text-xl font-bold sm:text-2xl">
+        <Settings className="mr-2 inline-block h-7 w-7" />
         系统设置
       </h1>
-      <p className="text-muted-foreground mb-6">
-        配置系统运行参数、预警阈值和米家智能设备同步。
-      </p>
 
       {!canQueryProtectedApi ? (
-        <div className="rounded-lg border bg-muted/40 p-6 text-sm text-muted-foreground">
+        <div className="rounded-lg border bg-muted/40 p-3 text-sm text-muted-foreground">
           当前登录状态无效，请先重新登录后再进入系统设置。
         </div>
       ) : (
 
       <Tabs defaultValue="params" className="w-full">
-        <TabsList className="mb-6 h-auto w-full flex-wrap justify-start">
+        <TabsList className="mb-2.5 h-auto w-full flex-wrap justify-start">
           <TabsTrigger value="params" className="text-xs sm:text-sm">系统参数</TabsTrigger>
-          {canManageDevices && <TabsTrigger value="devices" className="text-xs sm:text-sm">已识别设备</TabsTrigger>}
-          {canManageXiaomi && <TabsTrigger value="xiaomi" className="text-xs sm:text-sm">米家同步</TabsTrigger>}
+          {canManageDevices && <TabsTrigger value="devices" className="text-xs sm:text-sm">设备总览</TabsTrigger>}
+          {canManageXiaomi && <TabsTrigger value="xiaomi" className="text-xs sm:text-sm">设备同步</TabsTrigger>}
           {canManageUsers && <TabsTrigger value="accounts" className="text-xs sm:text-sm">账号管理</TabsTrigger>}
         </TabsList>
 
@@ -651,8 +1190,8 @@ export function SystemSettingsPage() {
               <CardHeader>
                 <CardTitle className="text-lg">系统参数配置</CardTitle>
               </CardHeader>
-              <CardContent className="space-y-6">
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              <CardContent className="space-y-3">
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
                   <div className="space-y-2">
                     <Label htmlFor="alarm80">80% 预警阈值 (%)</Label>
                     <Input
@@ -764,22 +1303,198 @@ export function SystemSettingsPage() {
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="pricePerKwh">电价 (欧元/度)</Label>
+                    <div className="flex items-center gap-2">
+                      <Input
+                        id="pricePerKwh"
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={getValue('pricePerKwh', 0.6) ?? ''}
+                        onChange={(e) =>
+                          setValue('pricePerKwh', parseFloat(e.target.value) || 0)
+                        }
+                        disabled={!canEdit}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="icon"
+                        onClick={handleRefreshReferencePrice}
+                        disabled={!canEdit || refreshReferencePriceMutation.isPending}
+                        title="自动获取参考电价"
+                      >
+                        <RefreshCw className={cn('h-4 w-4', refreshReferencePriceMutation.isPending && 'animate-spin')} />
+                      </Button>
+                    </div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="priceAutoRegion">参考区域</Label>
                     <Input
-                      id="pricePerKwh"
+                      id="priceAutoRegion"
+                      value={getValue('priceAutoRegion', '') ?? ''}
+                      onChange={(e) => setValue('priceAutoRegion', e.target.value)}
+                      placeholder="国家 / 城市 / 时区"
+                      disabled={!canEdit}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label>自动获取</Label>
+                    <div className="flex min-h-10 items-center justify-between rounded-md border px-3">
+                      <span className="text-sm">自动更新参考电价</span>
+                      <Switch
+                        checked={!!getValue('priceAutoEnabled', false)}
+                        onCheckedChange={(checked) => setValue('priceAutoEnabled', checked)}
+                        disabled={!canEdit}
+                      />
+                    </div>
+                    {(getValue('priceAutoSource', '') || getValue('priceAutoLastUpdatedAt', '')) ? (
+                      <div className="text-xs text-muted-foreground">
+                        {String(getValue('priceAutoSource', '') ?? '')}
+                        {getValue('priceAutoLastUpdatedAt', '')
+                          ? ` · ${formatDateTimeShort(String(getValue('priceAutoLastUpdatedAt', '') ?? ''))}`
+                          : ''}
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="defaultDailyLimitKwh">通用日限额 (kWh/天)</Label>
+                    <Input
+                      id="defaultDailyLimitKwh"
                       type="number"
                       min="0"
-                      step="0.01"
-                      value={getValue('pricePerKwh', 0.6) ?? ''}
+                      step="0.1"
+                      value={getValue('defaultDailyLimitKwh', 10) ?? ''}
                       onChange={(e) =>
-                        setValue('pricePerKwh', parseFloat(e.target.value) || 0)
+                        setValue('defaultDailyLimitKwh', parseFloat(e.target.value) || 0)
+                      }
+                      disabled={!canEdit || bulkLimitSaving}
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="defaultMonthlyCostLimitEur">通用月费用限额 (EUR/月)</Label>
+                    <Input
+                      id="defaultMonthlyCostLimitEur"
+                      type="number"
+                      min="0"
+                      step="1"
+                      value={getValue('defaultMonthlyCostLimitEur', 200) ?? ''}
+                      onChange={(e) =>
+                        setValue('defaultMonthlyCostLimitEur', parseFloat(e.target.value) || 0)
                       }
                       disabled={!canEdit}
                     />
                   </div>
                 </div>
 
+                <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-medium text-slate-900">规则限额</div>
+                      <div className="text-xs text-muted-foreground">
+                        开启后，系统会自动按普通日 / 周六 / 周日 / 节假日挑一个最终限额。
+                      </div>
+                    </div>
+                    <Switch
+                      checked={!!getValue('defaultDailyLimitUseWeeklyRules', false)}
+                      onCheckedChange={(checked) => setValue('defaultDailyLimitUseWeeklyRules', checked)}
+                      disabled={!canEdit || bulkLimitSaving}
+                    />
+                  </div>
+                  <div className="mt-4 grid gap-4 md:grid-cols-3">
+                    <div className="space-y-2">
+                      <Label htmlFor="defaultDailyLimitWeekdayKwh">普通日限额 (周一到周五)</Label>
+                      <Input
+                        id="defaultDailyLimitWeekdayKwh"
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={getValue('defaultDailyLimitWeekdayKwh', getValue('defaultDailyLimitKwh', 10) ?? 10) ?? ''}
+                        onChange={(e) =>
+                          setValue('defaultDailyLimitWeekdayKwh', parseFloat(e.target.value) || 0)
+                        }
+                        disabled={!canEdit || bulkLimitSaving}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="defaultDailyLimitSaturdayKwh">周六限额</Label>
+                      <Input
+                        id="defaultDailyLimitSaturdayKwh"
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={getValue('defaultDailyLimitSaturdayKwh', getValue('defaultDailyLimitKwh', 10) ?? 10) ?? ''}
+                        onChange={(e) =>
+                          setValue('defaultDailyLimitSaturdayKwh', parseFloat(e.target.value) || 0)
+                        }
+                        disabled={!canEdit || bulkLimitSaving}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="defaultDailyLimitSundayKwh">周日限额</Label>
+                      <Input
+                        id="defaultDailyLimitSundayKwh"
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={getValue('defaultDailyLimitSundayKwh', getValue('defaultDailyLimitKwh', 10) ?? 10) ?? ''}
+                        onChange={(e) =>
+                          setValue('defaultDailyLimitSundayKwh', parseFloat(e.target.value) || 0)
+                        }
+                        disabled={!canEdit || bulkLimitSaving}
+                      />
+                    </div>
+                  </div>
+                  <div className="mt-4 grid gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
+                    <div className="space-y-2">
+                      <Label htmlFor="defaultDailyLimitHolidayKwh">节假日限额</Label>
+                      <Input
+                        id="defaultDailyLimitHolidayKwh"
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={getValue('defaultDailyLimitHolidayKwh', getValue('defaultDailyLimitKwh', 10) ?? 10) ?? ''}
+                        onChange={(e) =>
+                          setValue('defaultDailyLimitHolidayKwh', parseFloat(e.target.value) || 0)
+                        }
+                        disabled={!canEdit || bulkLimitSaving}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label htmlFor="defaultDailyLimitHolidayDates">节假日日期</Label>
+                      <Input
+                        id="defaultDailyLimitHolidayDates"
+                        value={getValue('defaultDailyLimitHolidayDates', '') ?? ''}
+                        onChange={(e) => setValue('defaultDailyLimitHolidayDates', e.target.value)}
+                        placeholder="多个日期用逗号分隔，例如 2026-12-25,2026-12-26"
+                        disabled={!canEdit || bulkLimitSaving}
+                      />
+                    </div>
+                  </div>
+                </div>
+
                 <div className="text-sm text-muted-foreground">
                   这里选的是系统结算时区。米家云还是走国内服务器，但“今天/昨天/7天/30天/清零时间”都会按这里算。
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm">
+                  <div className="text-muted-foreground">
+                    默认走通用限额；开启规则限额后，系统只会按当天命中的那一条来算，节假日优先，其次周六周日，最后普通日。
+                  </div>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={handleApplyDefaultDailyLimit}
+                    disabled={!canEdit || bulkLimitSaving}
+                  >
+                    {bulkLimitSaving ? (
+                      <Save className="mr-2 h-4 w-4 animate-spin" />
+                    ) : (
+                      <Save className="mr-2 h-4 w-4" />
+                    )}
+                    {!!getValue('defaultDailyLimitUseWeeklyRules', false)
+                      ? '保存并应用规则'
+                      : '应用到全部空开'}
+                  </Button>
                 </div>
 
                 <div className="flex justify-end pt-2">
@@ -802,24 +1517,54 @@ export function SystemSettingsPage() {
         {canManageDevices && (
         <TabsContent value="devices">
           <Card>
-            <CardHeader>
-              <CardTitle className="text-lg">已识别设备</CardTitle>
-            </CardHeader>
             <CardContent className="space-y-4">
-              <div className="rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground">
-                当前已识别 <span className="font-semibold text-foreground">{dashboardSummary?.totalDevices ?? 0}</span> 台设备。
-                现在默认按 1 台设备 = 1 个独立空间展示。你只需要把名称改成房间名或区域名，不需要再做额外绑定。
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <Tabs defaultValue="all" className="w-full">
+                  <TabsList className="grid w-full max-w-xl grid-cols-4">
+                    <TabsTrigger value="all">
+                      全部设备 ({dashboardSummary?.totalDevices ?? 0})
+                    </TabsTrigger>
+                    <TabsTrigger value="xiaomi">
+                      米家 ({dashboardSummary?.devices?.length ?? 0})
+                    </TabsTrigger>
+                    <TabsTrigger value="tuya">涂鸦 (0)</TabsTrigger>
+                    <TabsTrigger value="other">其他 (0)</TabsTrigger>
+                  </TabsList>
+                  <TabsContent value="all" className="mt-4">
+                    <DevicesTable
+                      devices={dashboardSummary?.devices ?? []}
+                      invalidateOnChange={async () => {
+                        await queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+                        await queryClient.invalidateQueries({ queryKey: ['xiaomi-status'] })
+                      }}
+                    />
+                  </TabsContent>
+                  <TabsContent value="xiaomi" className="mt-4">
+                    <DevicesTable
+                      devices={dashboardSummary?.devices ?? []}
+                      invalidateOnChange={async () => {
+                        await queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+                        await queryClient.invalidateQueries({ queryKey: ['xiaomi-status'] })
+                      }}
+                    />
+                  </TabsContent>
+                  <TabsContent value="tuya" className="mt-4">
+                    <div className="rounded-lg border border-dashed p-3 text-center text-sm text-muted-foreground">
+                      暂无涂鸦设备
+                    </div>
+                  </TabsContent>
+                  <TabsContent value="other" className="mt-4">
+                    <div className="rounded-lg border border-dashed p-3 text-center text-sm text-muted-foreground">
+                      暂无其他来源设备
+                    </div>
+                  </TabsContent>
+                </Tabs>
+
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="success">在线 {dashboardSummary?.onlineDevices ?? 0}</Badge>
+                  <Badge variant="danger">离线 {dashboardSummary?.offlineDevices ?? 0}</Badge>
+                </div>
               </div>
-              <div className="rounded-lg border border-dashed bg-background p-3 text-sm text-muted-foreground">
-                直接在下方“空间名称”这一列里，点每一行名称右侧的 <span className="font-medium text-foreground">改名</span> 按钮即可修改。
-              </div>
-              <DevicesTable
-                devices={dashboardSummary?.devices ?? []}
-                invalidateOnChange={async () => {
-                  await queryClient.invalidateQueries({ queryKey: ['dashboard'] })
-                  await queryClient.invalidateQueries({ queryKey: ['xiaomi-status'] })
-                }}
-              />
             </CardContent>
           </Card>
         </TabsContent>
@@ -827,101 +1572,60 @@ export function SystemSettingsPage() {
 
         {canManageXiaomi && (
         <TabsContent value="xiaomi">
-          <div className="grid gap-6">
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-lg flex items-center gap-2">
-                  <Power className="h-5 w-5" />
-                  米家账号状态
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-5 max-w-2xl">
-                <Tabs defaultValue="session" className="w-full">
-                  <TabsList className="grid w-full grid-cols-2">
-                    <TabsTrigger value="session">会话登录</TabsTrigger>
-                    <TabsTrigger value="password">密码验证</TabsTrigger>
-                  </TabsList>
+          <Tabs defaultValue="account-sync" className="space-y-3">
+            <TabsList className="grid w-full grid-cols-3">
+              <TabsTrigger value="account-sync">账号同步</TabsTrigger>
+              <TabsTrigger value="api-sync">API 同步</TabsTrigger>
+              <TabsTrigger value="lan-discovery">本地识别</TabsTrigger>
+            </TabsList>
 
-                  <TabsContent value="session" className="mt-4">
+            <TabsContent value="account-sync" className="mt-0">
+              <Card>
+                <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-2">
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <Power className="h-5 w-5" />
+                    账号同步
+                  </CardTitle>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9 rounded-full"
+                    onClick={() => setAccountHelpOpen(true)}
+                  >
+                    <HelpCircle className="h-5 w-5" />
+                    <span className="sr-only">帮助</span>
+                  </Button>
+                </CardHeader>
+                <CardContent className="space-y-3 min-h-[360px]">
+                  <div className="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
                     <div className="rounded-lg border bg-background p-4 space-y-4">
-                      <div className="grid grid-cols-1 gap-4">
-                        <div className="space-y-2">
-                          <Label htmlFor="xiaomi-user-id">userId</Label>
-                          <Input
-                            id="xiaomi-user-id"
-                            type="text"
-                            placeholder="请输入 userId"
-                            value={xiaomiUserId}
-                            onChange={(e) => setXiaomiUserId(e.target.value)}
-                            disabled={!canManageXiaomi || xiaomiLogging}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="xiaomi-service-token">serviceToken</Label>
-                          <Input
-                            id="xiaomi-service-token"
-                            type="text"
-                            placeholder="请输入 serviceToken"
-                            value={xiaomiServiceToken}
-                            onChange={(e) => setXiaomiServiceToken(e.target.value)}
-                            disabled={!canManageXiaomi || xiaomiLogging}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="xiaomi-ssecurity">ssecurity</Label>
-                          <Input
-                            id="xiaomi-ssecurity"
-                            type="text"
-                            placeholder="请输入 ssecurity"
-                            value={xiaomiSsecurity}
-                            onChange={(e) => setXiaomiSsecurity(e.target.value)}
-                            disabled={!canManageXiaomi || xiaomiLogging}
-                          />
-                        </div>
-                        <div className="space-y-2">
-                          <Label htmlFor="xiaomi-region">region</Label>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="space-y-2 md:col-span-2">
+                          <Label htmlFor="device-provider">设备厂商</Label>
                           <Select
-                            value={xiaomiRegion}
-                            onValueChange={setXiaomiRegion}
+                            value={deviceProvider}
+                            onValueChange={(value) => setDeviceProvider(value as (typeof DEVICE_PROVIDER_OPTIONS)[number]['value'])}
                             disabled={!canManageXiaomi || xiaomiLogging}
                           >
-                            <SelectTrigger id="xiaomi-region">
-                              <SelectValue placeholder="选择区域" />
+                            <SelectTrigger id="device-provider">
+                              <SelectValue placeholder="选择设备厂商" />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="cn">中国大陆（cn）</SelectItem>
-                              <SelectItem value="de">德国（de）</SelectItem>
-                              <SelectItem value="sg">新加坡（sg）</SelectItem>
-                              <SelectItem value="us">美国（us）</SelectItem>
+                              {DEVICE_PROVIDER_OPTIONS.map((item) => (
+                                <SelectItem key={item.value} value={item.value}>
+                                  {item.label}
+                                </SelectItem>
+                              ))}
                             </SelectContent>
                           </Select>
                         </div>
-                      </div>
-                      <div className="flex flex-wrap gap-3">
-                        <Button
-                          onClick={handleXiaomiSessionLogin}
-                          disabled={!canManageXiaomi || xiaomiLogging}
-                        >
-                          {xiaomiLogging ? (
-                            <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                          ) : (
-                            <LogIn className="mr-2 h-4 w-4" />
-                          )}
-                          会话登录米家
-                        </Button>
-                      </div>
-                    </div>
-                  </TabsContent>
-
-                  <TabsContent value="password" className="mt-4">
-                    <div className="rounded-lg border bg-background p-4 space-y-4">
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div className="space-y-2">
-                          <Label htmlFor="xiaomi-username">米家账号</Label>
+                          <Label htmlFor="xiaomi-username">账号</Label>
                           <Input
                             id="xiaomi-username"
                             type="text"
-                            placeholder="手机号 / 邮箱"
+                            placeholder={deviceProvider === 'xiaomi' ? '手机号 / 邮箱' : '请输入账号'}
                             autoComplete="username"
                             value={xiaomiUsername}
                             onChange={(e) => setXiaomiUsername(e.target.value)}
@@ -929,57 +1633,128 @@ export function SystemSettingsPage() {
                           />
                         </div>
                         <div className="space-y-2">
-                          <Label htmlFor="xiaomi-password">米家密码</Label>
-                          <Input
+                          <Label htmlFor="xiaomi-password">密码</Label>
+                          <PasswordInput
                             id="xiaomi-password"
-                            type="password"
-                            placeholder="请输入米家独立密码"
+                            placeholder="请输入密码"
                             autoComplete="current-password"
                             value={xiaomiPassword}
                             onChange={(e) => setXiaomiPassword(e.target.value)}
                             disabled={!canManageXiaomi || xiaomiLogging}
                           />
                         </div>
-                      </div>
-                      <p className="text-sm text-muted-foreground">
-                        这条链路现在不稳定。优先用上面的会话登录；这里只保留作备用排查。
-                      </p>
-                      {verificationPending && xiaomiStatus?.auth?.verificationMethod === 'email_code' ? (
-                        <div className="rounded-lg border bg-muted/30 p-3 space-y-3">
-                          <div className="space-y-2">
-                            <Label htmlFor="xiaomi-email-code">邮箱验证码</Label>
-                            <Input
-                              id="xiaomi-email-code"
-                              type="text"
-                              placeholder="请输入邮箱收到的验证码"
-                              value={xiaomiEmailCode}
-                              onChange={(e) => setXiaomiEmailCode(e.target.value)}
-                              disabled={!canManageXiaomi || xiaomiLogging}
-                            />
-                          </div>
-                          <div className="flex flex-wrap gap-3">
+                        <div className="space-y-2 md:col-span-2">
+                          <div className="flex items-center justify-between gap-3 pt-1">
+                            <div
+                              className="inline-flex items-center gap-2 select-none cursor-pointer"
+                              onClick={(e) => {
+                                e.preventDefault();
+                                persistXiaomiRemember({ enabled: !xiaomiRemember.enabled })
+                              }}
+                            >
+                              {xiaomiRemember.enabled ? (
+                                <CheckSquare className="h-4 w-4 text-primary shrink-0" aria-hidden />
+                              ) : (
+                                <Square className="h-4 w-4 text-slate-400 shrink-0" aria-hidden />
+                              )}
+                              <span className="text-xs text-slate-600 dark:text-slate-300">
+                                记住米家账号密码（下次打开自动回填）
+                              </span>
+                            </div>
                             <Button
                               type="button"
-                              variant="outline"
-                              onClick={handleXiaomiSendEmailCode}
-                              disabled={!canManageXiaomi || xiaomiLogging}
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 px-2 text-[11px] text-slate-500 hover:text-rose-600"
+                              onClick={() => { clearXiaomiRemember() }}
+                              disabled={!xiaomiRemember.username && !xiaomiRemember.password}
                             >
-                              发送验证码
-                            </Button>
-                            <Button
-                              type="button"
-                              variant="secondary"
-                              onClick={handleXiaomiVerifyEmailCode}
-                              disabled={!canManageXiaomi || xiaomiLogging}
-                            >
-                              提交验证码
+                              清除记住的凭据
                             </Button>
                           </div>
                         </div>
-                      ) : null}
-                      <div className="flex flex-wrap gap-3 pt-1">
+                        <div className="space-y-2 md:col-span-2">
+                          <div className="flex items-center justify-between gap-3">
+                            <Label htmlFor="xiaomi-region">地区</Label>
+                            <span
+                              className={cn(
+                                'inline-flex items-center rounded-md px-2 py-0.5 text-[10.5px] font-medium ring-1 ring-inset',
+                                xiaomiRegion === 'cn'
+                                  ? 'bg-slate-50 text-slate-700 ring-slate-200'
+                                  : 'bg-blue-50 text-blue-700 ring-blue-200',
+                              )}
+                            >
+                              服务器：{xiaomiRegion?.toUpperCase()}
+                              {xiaomiRegion === 'cn' ? ' 中国大陆' : ` 欧洲${xiaomiRegion?.toUpperCase()}`}
+                            </span>
+                          </div>
+                          <Select
+                            value={xiaomiRegion}
+                            onValueChange={setXiaomiRegion}
+                            disabled={!canManageXiaomi || xiaomiLogging}
+                          >
+                            <SelectTrigger id="xiaomi-region">
+                              <SelectValue placeholder="选择地区" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="cn">cn 中国大陆（默认）</SelectItem>
+                              <SelectItem value="at">at 奥地利</SelectItem>
+                              <SelectItem value="de">de 德国</SelectItem>
+                              <SelectItem value="fr">fr 法国</SelectItem>
+                              <SelectItem value="ru">ru 俄罗斯</SelectItem>
+                              <SelectItem value="sg">sg 新加坡</SelectItem>
+                              <SelectItem value="us">us 美国</SelectItem>
+                              <SelectItem value="in">in 印度</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+                      </div>
+
+                      {deviceProvider === 'xiaomi' ? (
+                        <>
+                          {verificationPending && xiaomiStatus?.auth?.verificationMethod === 'email_code' ? (
+                            <div className="rounded-lg border bg-muted/30 p-3 space-y-3">
+                              <div className="space-y-2">
+                                <Label htmlFor="xiaomi-email-code">邮箱验证码</Label>
+                                <Input
+                                  id="xiaomi-email-code"
+                                  type="text"
+                                  placeholder="请输入邮箱收到的验证码"
+                                  value={xiaomiEmailCode}
+                                  onChange={(e) => setXiaomiEmailCode(e.target.value)}
+                                  disabled={!canManageXiaomi || xiaomiLogging}
+                                />
+                              </div>
+                              <div className="flex flex-wrap gap-3">
+                                <Button
+                                  type="button"
+                                  variant="outline"
+                                  onClick={handleXiaomiSendEmailCode}
+                                  disabled={!canManageXiaomi || xiaomiLogging}
+                                >
+                                  发送验证码
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="secondary"
+                                  onClick={handleXiaomiVerifyEmailCode}
+                                  disabled={!canManageXiaomi || xiaomiLogging}
+                                >
+                                  提交验证码
+                                </Button>
+                              </div>
+                            </div>
+                          ) : null}
+                        </>
+                      ) : (
+                        <div className="rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                          涂鸦支持账号密码接入，这个入口已经留好；当前这版后端还没接通真实登录和同步。
+                        </div>
+                      )}
+
+                      <div className="flex flex-wrap gap-3">
                         <Button
-                          onClick={handleXiaomiLogin}
+                          onClick={handleDeviceProviderLogin}
                           disabled={!canManageXiaomi || xiaomiLogging}
                         >
                           {xiaomiLogging ? (
@@ -987,9 +1762,14 @@ export function SystemSettingsPage() {
                           ) : (
                             <LogIn className="mr-2 h-4 w-4" />
                           )}
-                          {xiaomiStatus?.loggedIn ? '重新登录米家' : '登录米家账号'}
+                          {deviceProvider === 'xiaomi'
+                            ? providerLoggedIn
+                              ? '重新登录'
+                              : '登录账号'
+                            : '登录账号'}
                         </Button>
-                        {xiaomiStatus?.auth?.notificationUrl &&
+                        {deviceProvider === 'xiaomi' &&
+                        xiaomiStatus?.auth?.notificationUrl &&
                         !xiaomiStatus?.loggedIn &&
                         xiaomiStatus?.auth?.verificationMethod !== 'email_code' ? (
                           <Button
@@ -1010,7 +1790,10 @@ export function SystemSettingsPage() {
                             打开验证页
                           </Button>
                         ) : null}
-                        {verificationPending && !xiaomiStatus?.loggedIn && xiaomiStatus?.auth?.verificationMethod !== 'email_code' ? (
+                        {deviceProvider === 'xiaomi' &&
+                        verificationPending &&
+                        !xiaomiStatus?.loggedIn &&
+                        xiaomiStatus?.auth?.verificationMethod !== 'email_code' ? (
                           <Button
                             type="button"
                             variant="secondary"
@@ -1022,111 +1805,595 @@ export function SystemSettingsPage() {
                         ) : null}
                       </div>
                     </div>
-                  </TabsContent>
-                </Tabs>
 
-                <div className="flex flex-wrap items-center gap-3">
-                  <span className="text-sm font-medium text-muted-foreground">
-                    登录状态：
-                  </span>
-                  {xiaomiStatus?.loggedIn ? (
-                    <Badge className="gap-1 bg-emerald-600 hover:bg-emerald-700">
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                      已登录
-                    </Badge>
-                  ) : (
-                    <Badge variant="destructive" className="gap-1">
-                      <XCircle className="h-3.5 w-3.5" />
-                      未登录
-                    </Badge>
-                  )}
-                  {xiaomiStatus?.username && (
-                    <span className="text-sm text-muted-foreground">
-                      账号：{xiaomiStatus.username}
-                    </span>
-                  )}
-                  {verificationPending && (
-                    <Badge variant="secondary" className="gap-1">
-                      <Info className="h-3.5 w-3.5" />
-                      验证完成后会自动继续登录
-                    </Badge>
-                  )}
-                </div>
+                    <div className="rounded-lg border bg-background p-4 space-y-4">
+                      <div className="space-y-2">
+                        <div className="text-sm font-medium text-foreground">同步状态</div>
+                        <div className="flex flex-wrap items-center gap-3">
+                          <span className="text-sm font-medium text-muted-foreground">
+                            登录状态：
+                          </span>
+                          {providerLoggedIn ? (
+                            <Badge className="gap-1 bg-emerald-600 hover:bg-emerald-700">
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              已登录
+                            </Badge>
+                          ) : (
+                            <Badge variant="destructive" className="gap-1">
+                              <XCircle className="h-3.5 w-3.5" />
+                              未登录
+                            </Badge>
+                          )}
+                        </div>
+                        <div className="text-sm text-muted-foreground">账号：{providerAccount}</div>
+                        <div className="text-sm text-muted-foreground">
+                          最近一次接入结果：{providerLastResult}
+                        </div>
+                      </div>
 
-                {xiaomiStatus?.auth && (
-                  <div className="rounded-lg border bg-muted/30 p-4 space-y-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm font-medium text-muted-foreground">
-                        最近一次登录结果：
-                      </span>
-                      <Badge variant={xiaomiStatus.auth.needsVerification ? 'secondary' : xiaomiStatus.auth.state === 'logged_in' ? 'default' : 'destructive'}>
-                        {xiaomiStatus.auth.state === 'logged_in'
-                          ? '已登录成功'
-                          : xiaomiStatus.auth.needsVerification
-                            ? '需要安全验证'
-                            : xiaomiStatus.auth.state === 'error'
-                              ? '登录失败'
-                              : '等待登录'}
-                      </Badge>
+                      <div className="space-y-3">
+                        <div className="text-sm font-medium text-foreground">设备同步</div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Button
+                            onClick={handleAccountPullDevices}
+                            disabled={!canManageXiaomi || accountSyncing || (deviceProvider === 'xiaomi' && !providerLoggedIn)}
+                          >
+                            {accountSyncing ? (
+                              <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                            ) : (
+                              <RefreshCw className="mr-2 h-4 w-4" />
+                            )}
+                            {accountSyncing ? '识别中...' : '识别设备'}
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 rounded-lg border bg-background">
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
+                      <div className="flex flex-wrap items-center gap-2 text-sm">
+                        <span className="font-medium">识别设备列表</span>
+                        {accountDevices.length > 0 ? (
+                          <Badge variant="outline">识别到 {accountDevices.length} 个</Badge>
+                        ) : null}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {accountDevices.some((d) => !d.added) ? (
+                          <Button
+                            type="button"
+                            onClick={handleAccountSyncAll}
+                            size="sm"
+                          >
+                            <Plus className="mr-2 h-4 w-4" />
+                            一键同步（{accountDevices.filter((d) => !d.added).length}）
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="divide-y">
+                      {accountDevices.length === 0 ? (
+                        <div className="py-12 text-center text-sm text-muted-foreground">
+                          先登录账号，再点「识别设备」，识别到的设备会在这里展示，再一键同步到当前区域。
+                        </div>
+                      ) : (
+                        accountDevices.map((d) => (
+                          <div
+                            key={d.id}
+                            className="flex flex-wrap items-center justify-between gap-3 px-4 py-3"
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-medium text-foreground">
+                                  {d.name ?? `设备 ${d.id.slice(-5)}`}
+                                </span>
+                                {d.provider ? (
+                                  <Badge variant="secondary">{d.provider}</Badge>
+                                ) : null}
+                                {d.sourceRegion ? (
+                                  <span
+                                    className={cn(
+                                      'inline-flex items-center rounded-md px-1.5 py-0.5 text-[9px] font-medium ring-1 ring-inset',
+                                      d.sourceScope === 'camera' || d.sourceRegion !== 'cn'
+                                        ? 'bg-blue-50 text-blue-700 ring-blue-200 dark:bg-blue-950/60 dark:text-blue-300 dark:ring-blue-800/60'
+                                        : 'bg-slate-50 text-slate-700 ring-slate-200 dark:bg-slate-900/40 dark:text-slate-300 dark:ring-slate-700/60',
+                                    )}
+                                  >
+                                    {d.sourceScope === 'camera' || d.sourceRegion !== 'cn'
+                                      ? `EU-${d.sourceRegion.toUpperCase()}`
+                                      : `CN-${d.sourceRegion.toUpperCase()} 大陆`}
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center rounded-md bg-slate-50 px-1.5 py-0.5 text-[9px] font-medium text-slate-600 ring-1 ring-inset ring-slate-200 dark:bg-slate-900/40 dark:text-slate-400 dark:ring-slate-700/60">
+                                    CN-大陆
+                                  </span>
+                                )}
+                                <Badge variant="outline">账号识别设备</Badge>
+                              </div>
+                              <div className="mt-1 text-xs text-muted-foreground">
+                                ID {d.id.slice(-8)}
+                                {d.model ? ` · 型号 ${d.model}` : ''}
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              {d.added ? (
+                                <Badge variant="outline">已同步</Badge>
+                              ) : (
+                                <>
+                                  {sites[0]?.id ? (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => {
+                                        setAccountDevices((prev) =>
+                                          prev.map((x) => (x.id === d.id ? { ...x, added: true } : x)),
+                                        )
+                                        const label =
+                                          sites[0].name
+                                        toast.success(`已同步到 ${label}`)
+                                      }}
+                                    >
+                                      同步到当前区域
+                                    </Button>
+                                  ) : null}
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+            </TabsContent>
+
+            <TabsContent value="api-sync" className="mt-0">
+              <Card>
+                <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-2">
+                  <CardTitle className="text-lg">云厂商 API 同步</CardTitle>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9 rounded-full"
+                    onClick={() => setApiHelpOpen(true)}
+                  >
+                    <HelpCircle className="h-5 w-5" />
+                    <span className="sr-only">帮助</span>
+                  </Button>
+                </CardHeader>
+                <CardContent className="space-y-3 min-h-[360px]">
+                  <div className="grid gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(320px,0.75fr)]">
+                    <div className="rounded-lg border bg-background p-4 space-y-4">
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label htmlFor="api-sync-provider">云厂商</Label>
+                          <Select
+                            value={apiSyncProvider}
+                            onValueChange={(value) =>
+                              setApiSyncProvider(value as (typeof API_SYNC_OPTIONS)[number]['value'])
+                            }
+                          >
+                            <SelectTrigger id="api-sync-provider">
+                              <SelectValue placeholder="选择云厂商" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {API_SYNC_OPTIONS.map((item) => (
+                                <SelectItem key={item.value} value={item.value}>
+                                  {item.label}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="api-base-url">API 地址</Label>
+                          <Input
+                            id="api-base-url"
+                            placeholder={
+                              apiSyncProvider === 'tuya_cloud'
+                                ? '涂鸦云由后端固定路由处理，无需填写'
+                                : '例如 https://iot-api.example.com'
+                            }
+                            value={apiBaseUrl}
+                            onChange={(e) => setApiBaseUrl(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="api-access-key">Access Key</Label>
+                          <Input
+                            id="api-access-key"
+                            placeholder="请输入 Access Key"
+                            value={apiAccessKey}
+                            onChange={(e) => setApiAccessKey(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-2">
+                          <Label htmlFor="api-access-secret">Access Secret</Label>
+                          <Input
+                            id="api-access-secret"
+                            type="password"
+                            placeholder="请输入 Access Secret"
+                            value={apiAccessSecret}
+                            onChange={(e) => setApiAccessSecret(e.target.value)}
+                          />
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-3">
+                        <Badge variant={apiSyncStatus === '未连接' ? 'secondary' : 'outline'}>
+                          {apiSyncStatus}
+                        </Badge>
+                        <Button type="button" variant="outline" onClick={handleApiSyncConnect}>
+                          连接 API
+                        </Button>
+                      </div>
                     </div>
 
-                    {xiaomiStatus.auth.message && (
-                      <p className="text-sm text-muted-foreground">
-                        {xiaomiStatus.auth.message}
-                      </p>
-                    )}
-                    {xiaomiStatus.auth.lastAttemptAt && (
-                      <p className="text-xs text-muted-foreground">
-                        最近尝试时间：{new Date(xiaomiStatus.auth.lastAttemptAt).toLocaleString()}
-                      </p>
+                    <div className="rounded-lg border bg-background p-4 space-y-4">
+                      <div className="flex flex-wrap items-center gap-3">
+                        <Badge variant={apiSyncStatus === '未连接' ? 'secondary' : 'outline'}>
+                          {apiSyncStatus}
+                        </Badge>
+                        <Button type="button" variant="outline" onClick={handleApiSyncConnect}>
+                          连接 API
+                        </Button>
+                        <Button
+                          type="button"
+                          onClick={handleApiPullDevices}
+                          disabled={apiPulling}
+                        >
+                          {apiPulling ? (
+                            <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
+                          ) : (
+                            <RefreshCw className="mr-2 h-4 w-4" />
+                          )}
+                          {apiPulling ? '识别中...' : '识别设备'}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-6 rounded-lg border bg-background">
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
+                      <div className="flex flex-wrap items-center gap-2 text-sm">
+                        <span className="font-medium">识别设备列表</span>
+                        {apiDevices.length > 0 ? (
+                          <Badge variant="outline">识别到 {apiDevices.length} 个</Badge>
+                        ) : null}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {apiDevices.some((d) => !d.added) ? (
+                          <Button
+                            type="button"
+                            onClick={handleApiSyncAll}
+                            size="sm"
+                          >
+                            <Plus className="mr-2 h-4 w-4" />
+                            一键同步（{apiDevices.filter((d) => !d.added).length}）
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                    <div className="divide-y">
+                      {apiDevices.length === 0 ? (
+                        <div className="py-12 text-center text-sm text-muted-foreground">
+                          先填 Access Key/Secret 连接 API，再点「识别设备」，识别到的设备会在这里展示，再一键同步到当前区域。
+                        </div>
+                      ) : (
+                        apiDevices.map((d) => (
+                          <div
+                            key={d.id}
+                            className="flex flex-wrap items-center justify-between gap-3 px-4 py-3"
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-medium text-foreground">
+                                  {d.name ?? `设备 ${d.id.slice(-5)}`}
+                                </span>
+                                {d.provider ? (
+                                  <Badge variant="secondary">{d.provider}</Badge>
+                                ) : null}
+                                <Badge variant="outline">API同步设备</Badge>
+                              </div>
+                              <div className="mt-1 text-xs text-muted-foreground">
+                                ID {d.id.slice(-8)}
+                                {d.model ? ` · 型号 ${d.model}` : ''}
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              {d.added ? (
+                                <Badge variant="outline">已同步</Badge>
+                              ) : (
+                                <>
+                                  {sites[0]?.id ? (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline"
+                                      onClick={() => {
+                                        setApiDevices((prev) =>
+                                          prev.map((x) => (x.id === d.id ? { ...x, added: true } : x)),
+                                        )
+                                        const label = sites[0].name
+                                        toast.success(`已同步到 ${label}`)
+                                      }}
+                                    >
+                                      同步到当前区域
+                                    </Button>
+                                  ) : null}
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              <Dialog open={accountHelpOpen} onOpenChange={setAccountHelpOpen}>
+                <DialogContent className="max-w-xl">
+                  <DialogHeader>
+                    <DialogTitle>账号同步说明</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-2 text-sm text-muted-foreground">
+                    <div>这块走设备账号直接登录，适合米家、涂鸦这类账号体系。</div>
+                    <div>先选厂商，填账号密码，再点登录；登录成功后再点“同步设备”，设备会进入当前区域并在“设备总览”里统一显示。</div>
+                    <div>支持商家：米家、涂鸦。后面如果接入新的账号体系，也继续从这里扩。</div>
+                  </div>
+                </DialogContent>
+              </Dialog>
+
+              <Dialog open={apiHelpOpen} onOpenChange={setApiHelpOpen}>
+                <DialogContent className="max-w-xl">
+                  <DialogHeader>
+                    <DialogTitle>云厂商 API 同步说明</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-2 text-sm text-muted-foreground">
+                    <div>这块专门用于接入云厂商开放接口，适合涂鸦云、阿里云 IoT、华为云 IoT、腾讯云 IoT 这类云端设备管理平台。</div>
+                    <div>和“账号同步”的区别：账号同步是用你的用户账号密码去登；这个是用厂商给的固定 API Key / Secret 直接对接云平台。</div>
+                    <div>先选云厂商，填 API 地址（涂鸦云不用填）、Access Key 和 Secret，再点连接 API。后续真实接通后，这里会直接承担云端设备同步入口。</div>
+                    <div>适用场景：设备已经接在厂商云平台上，想直接从云端拉取设备数据和状态，不经过本地局域网扫描。</div>
+                  </div>
+                </DialogContent>
+              </Dialog>
+            </TabsContent>
+
+            <TabsContent value="lan-discovery" className="mt-0">
+              <Card className="h-[calc(100vh-260px)] overflow-hidden">
+                <CardHeader className="flex flex-row items-start justify-between space-y-0 pb-2">
+                  <CardTitle className="text-lg">本地识别</CardTitle>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-9 w-9 rounded-full"
+                    onClick={() => setLanHelpOpen(true)}
+                  >
+                    <HelpCircle className="h-5 w-5" />
+                    <span className="sr-only">帮助</span>
+                  </Button>
+                </CardHeader>
+                <CardContent className="h-[calc(100%-64px)] flex flex-col gap-4 overflow-hidden">
+                  <div className="flex flex-wrap items-end gap-3 shrink-0">
+                    <div className="w-60 space-y-2">
+                      <Label htmlFor="lan-subnet">{lanGuide.fieldLabel}</Label>
+                      <Input
+                        id="lan-subnet"
+                        placeholder={lanGuide.placeholder}
+                        value={lanSubnet}
+                        onChange={(e) => setLanSubnet(e.target.value)}
+                        disabled={lanScanning}
+                      />
+                    </div>
+                    <div className="flex items-center gap-2 pb-2">
+                      <Switch
+                        id="lan-vendor-remote"
+                        checked={lanVendorRemoteApi}
+                        onCheckedChange={(v) => setLanVendorRemoteApi(!!v)}
+                        disabled={lanScanning}
+                      />
+                      <Label htmlFor="lan-vendor-remote" className="text-xs font-normal text-muted-foreground">
+                          开启厂商名联网补全：内置没识别到时，自动查公开 API 显示更准（默认开启，极少数网络环境下会变慢，可手动关）
+                        </Label>
+                    </div>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={handleLanDiscovery}
+                      disabled={lanScanning}
+                    >
+                      {lanScanning ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          正在扫描
+                        </>
+                      ) : '开始识别'}
+                    </Button>
+                    <div className="text-sm text-muted-foreground">
+                      {lanScanning
+                        ? '正在扫描（请耐心等待，Ping + ARP 扫 254 个 IP 通常需要 15~45 秒）'
+                        : lanDiscoveredCount === null
+                          ? lanDiscoveryStatus === '未开始识别'
+                            ? '未识别'
+                            : lanDiscoveryStatus
+                          : lanDiscoveryStatus.includes('完成')
+                            ? lanDiscoveryStatus
+                            : `扫描中... ${lanDiscoveredCount} 个`}
+                    </div>
+                  </div>
+
+                  <div className="flex-1 min-h-0 overflow-y-auto pr-1">
+                    {lanDevices.length === 0 ? (
+                      <div className="flex h-full items-center justify-center rounded-lg border border-dashed text-sm text-muted-foreground">
+                        还没有识别到设备，点"开始识别"后会在这里显示
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="rounded-lg border border-emerald-500 bg-emerald-50 dark:bg-emerald-950/40 dark:border-emerald-800 px-4 py-3 text-sm text-emerald-900 dark:text-emerald-200">
+                          <div className="font-semibold mb-1">
+                            ✅ 已完成真实局域网扫描
+                          </div>
+                          <div className="text-xs leading-6">
+                            {lanDiscoveryStatus}
+                          </div>
+                          <div className="text-xs leading-6">
+                            🟢 = Ping 有回应 ｜ ⚪ 仅在 ARP 缓存（设备不回 Ping 但近期在网内活跃过，比如锁屏手机 / 智能电表 / 摄像头 / 低功耗 IoT 都可能显示成这样） ｜ ❔ 无记录
+                          </div>
+                        </div>
+                        <div className="sticky top-0 z-10 flex flex-wrap items-center justify-between gap-3 rounded-lg border bg-muted/90 backdrop-blur px-3 py-2">
+                          <div className="flex flex-wrap items-center gap-2 text-sm">
+                            <Badge variant="outline">识别到 {lanDevices.length} 个</Badge>
+                            <span className="text-xs text-muted-foreground">
+                              本地识别设备
+                            </span>
+                            {(() => {
+                              const counts = lanDevices.reduce<Record<string, number>>((acc, d) => {
+                                acc[d.category] = (acc[d.category] ?? 0) + 1
+                                return acc
+                              }, {})
+                              const arr = Object.entries(counts).filter(([, n]) => n > 0)
+                              if (!arr.length) return null
+                              return arr.map(([c, n]) => (
+                                <Badge key={c} variant="secondary" className="ml-1">
+                                  {DEVICE_CATEGORY_LABEL[c as DeviceCategory] ?? c} {n}
+                                </Badge>
+                              ))
+                            })()}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            {lanDevices.some((d) => !d.added) ? (
+                              <Button
+                                type="button"
+                                size="sm"
+                                onClick={handleLanSyncAll}
+                                disabled={persistLanDevicesMutation.isPending}
+                              >
+                                {persistLanDevicesMutation.isPending ? (
+                                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                                ) : (
+                                  <Plus className="mr-2 h-4 w-4" />
+                                )}
+                                一键同步（{lanDevices.filter((d) => !d.added).length}）
+                              </Button>
+                            ) : null}
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          {lanDevices.map((d) => {
+                            let dotColor = 'bg-gray-300'
+                            let dotTitle = '无记录'
+                            if (d.pingAlive) {
+                              dotColor = 'bg-green-500'
+                              dotTitle = 'Ping 在线'
+                            } else if (d.fromArp) {
+                              dotColor = 'bg-amber-400'
+                              dotTitle = 'ARP 缓存里有记录（不回 Ping）'
+                            }
+                            return (
+                              <div
+                                key={d.id}
+                                className="flex flex-wrap items-center gap-3 rounded-lg border p-3"
+                              >
+                                <div className="flex items-center gap-2 w-24 shrink-0">
+                                  <span
+                                    className={`h-3 w-3 inline-block rounded-full ${dotColor}`}
+                                    title={dotTitle}
+                                  />
+                                  <span className="text-xs text-muted-foreground">{dotTitle}</span>
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <span className="font-medium text-foreground">
+                                      {d.name || (
+                                        <span className="text-muted-foreground">
+                                          ID {d.id.slice(-8)}
+                                        </span>
+                                      )}
+                                    </span>
+                                    <Badge variant="outline">本地识别设备</Badge>
+                                    <Badge variant="secondary">{d.categoryLabel}</Badge>
+                                  </div>
+                                  <div className="mt-1 text-xs text-muted-foreground break-all">
+                                    IP {d.ip}
+                                    {d.mac ? <span className="ml-3">MAC {d.mac}</span> : null}
+                                    {d.vendor ? (
+                                      <span className="ml-3">厂商 {d.vendor}</span>
+                                    ) : null}
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <Select
+                                    defaultValue={sites[0]?.id}
+                                    disabled={d.added || persistLanDevicesMutation.isPending}
+                                    onValueChange={(v) => handleAddLanDevice(d.id, v)}
+                                  >
+                                    <SelectTrigger className="w-36">
+                                      <SelectValue placeholder="加入区域" />
+                                    </SelectTrigger>
+                                    <SelectContent>
+                                      {sites.map((s) => (
+                                        <SelectItem key={s.id} value={s.id}>
+                                          {s.name || (s.isPrimary ? '默认区' : s.code)}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                  {d.added ? (
+                                    <Badge variant="success" className="ml-1">
+                                      已写入
+                                    </Badge>
+                                  ) : (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      variant="outline"
+                                      disabled={persistLanDevicesMutation.isPending}
+                                      onClick={() => handleAddLanDevice(d.id, sites[0]?.id ?? 'default')}
+                                    >
+                                      {persistLanDevicesMutation.isPending ? (
+                                        <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                                      ) : (
+                                        <Plus className="mr-1 h-3.5 w-3.5" />
+                                      )}
+                                      写入
+                                    </Button>
+                                  )}
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
                     )}
                   </div>
-                )}
+                </CardContent>
+              </Card>
 
-              </CardContent>
-            </Card>
-
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-lg flex items-center gap-2">
-                  <RefreshCw className="h-5 w-5" />
-                  同步设备
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <p className="text-muted-foreground text-sm">
-                  点击下方按钮，立即从米家云端同步所有智能设备状态到本系统。同步后可以在仪表盘中查看最新的用电量数据。
-                </p>
-                <div>
-                  <Button
-                    onClick={handleXiaomiSync}
-                    disabled={!canManageXiaomi || xiaomiSyncing}
-                  >
-                    {xiaomiSyncing ? (
-                      <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                    ) : (
-                      <RefreshCw className="mr-2 h-4 w-4" />
-                    )}
-                    {xiaomiSyncing ? '同步中...' : '立即同步米家设备'}
-                  </Button>
-                </div>
-                <div className="mt-4 rounded-lg bg-muted p-4 text-sm text-muted-foreground">
-                  <p className="font-medium text-foreground mb-1">适配器信息</p>
-                  <ul className="list-disc list-inside space-y-1">
-                    <li>当前适配器：XiaomiAdapter</li>
-                    <li>版本：V1.0</li>
-                    <li>说明：只封装官方集成协议，数据安全可靠</li>
-                  </ul>
-                </div>
-              </CardContent>
-            </Card>
-          </div>
+              <Dialog open={lanHelpOpen} onOpenChange={setLanHelpOpen}>
+                <DialogContent className="max-w-xl">
+                  <DialogHeader>
+                    <DialogTitle>{lanGuide.title}</DialogTitle>
+                  </DialogHeader>
+                  <div className="space-y-2 text-sm text-muted-foreground">
+                    {lanGuide.steps.map((step) => (
+                      <div key={step}>{step}</div>
+                    ))}
+                  </div>
+                </DialogContent>
+              </Dialog>
+            </TabsContent>
+          </Tabs>
         </TabsContent>
         )}
 
         {canManageUsers && (
         <TabsContent value="accounts">
-          <div className="grid gap-6">
+          <div className="grid gap-3">
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-lg">

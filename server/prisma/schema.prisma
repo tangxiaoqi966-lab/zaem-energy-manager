@@ -1,5 +1,6 @@
 generator client {
   provider = "prisma-client-js"
+  output   = "../generated/prisma-client"
 }
 
 datasource db {
@@ -57,6 +58,25 @@ enum DeviceStatus {
   unknown
 }
 
+enum SiteAdapterType {
+  xiaomi_cloud
+  tuya_cloud
+  local_bridge
+  custom_api
+}
+
+enum NodeType {
+  master
+  edge
+}
+
+enum NodeStatus {
+  online
+  offline
+  unknown
+  syncing
+}
+
 model Role {
   id        String   @id @default(cuid())
   name      UserRole @unique
@@ -80,9 +100,47 @@ model User {
   operationLogs OperationLog[]
 }
 
+model Site {
+  id                   String          @id @default(cuid())
+  code                 String          @unique
+  name                 String
+  description          String?
+  adapterType          SiteAdapterType @default(xiaomi_cloud)
+  isPrimary            Boolean         @default(false)
+  storageRetentionDays Int             @default(365)
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+
+  rooms   Room[]
+  devices Device[]
+  nodes   EdgeNode[]
+}
+
+model EdgeNode {
+  id                    String     @id @default(cuid())
+  siteId                String
+  site                  Site       @relation(fields: [siteId], references: [id])
+  code                  String
+  name                  String
+  nodeType              NodeType   @default(edge)
+  status                NodeStatus @default(unknown)
+  localApiBaseUrl       String?
+  storageRetentionDays  Int        @default(90)
+  isLocalControlEnabled Boolean    @default(true)
+  lastHeartbeatAt       DateTime?
+  lastSyncAt            DateTime?
+  createdAt             DateTime   @default(now())
+  updatedAt             DateTime   @updatedAt
+
+  @@unique([siteId, code])
+  @@index([siteId, status])
+}
+
 model Room {
   id         String       @id @default(cuid())
-  roomNumber String       @unique
+  siteId     String
+  site       Site         @relation(fields: [siteId], references: [id])
+  roomNumber String
   name       String
   floor      Int          @default(1)
   status     RoomStatus   @default(normal)
@@ -97,11 +155,16 @@ model Room {
   monthlyEnergy MonthlyEnergy[]
   alarmLogs  AlarmLog[]
   operationLogs OperationLog[]
+
+  @@unique([siteId, roomNumber])
+  @@index([siteId])
 }
 
 model Device {
   id         String       @id @default(cuid())
   did        String       @unique
+  siteId     String
+  site       Site         @relation(fields: [siteId], references: [id])
   name       String
   model      String
   roomId     String?
@@ -115,6 +178,9 @@ model Device {
   lastSyncAt DateTime?
   createdAt  DateTime     @default(now())
   updatedAt  DateTime     @updatedAt
+  dailyNetworkTraffic DailyNetworkTraffic[]
+
+  @@index([siteId])
 }
 
 model EnergyLimit {
@@ -123,6 +189,8 @@ model EnergyLimit {
   room       Room     @relation(fields: [roomId], references: [id])
   dailyLimit Float    @default(10)
   enabled    Boolean  @default(false)
+  monthlyCostLimit Float @default(0)
+  costEnabled Boolean @default(false)
   updatedAt  DateTime @updatedAt
   createdAt  DateTime @default(now())
 }
@@ -138,6 +206,21 @@ model DailyEnergy {
   createdAt DateTime @default(now())
 
   @@unique([roomId, date])
+  @@index([date])
+}
+
+model DailyNetworkTraffic {
+  id         String   @id @default(cuid())
+  deviceId   String
+  device     Device   @relation(fields: [deviceId], references: [id])
+  date       DateTime
+  rxBytes    Float    @default(0)
+  txBytes    Float    @default(0)
+  totalBytes Float    @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([deviceId, date])
   @@index([date])
 }
 

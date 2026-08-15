@@ -7,6 +7,7 @@ import { Button } from '../components/ui/button'
 import { Input } from '../components/ui/input'
 import { Label } from '../components/ui/label'
 import { Badge } from '../components/ui/badge'
+import { Switch } from '../components/ui/switch'
 import {
   Select,
   SelectContent,
@@ -23,9 +24,10 @@ import {
   TableCell,
 } from '../components/ui/table'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs'
-import { logs } from '../lib/api'
+import { logs, system } from '../lib/api'
 import { getSocket } from '../lib/socket'
 import { useAuthStore } from '../store/auth'
+import { useSiteStore } from '../store/site'
 import {
   AlarmType,
   AlarmLevel,
@@ -52,6 +54,8 @@ const ALARM_LEVEL_OPTIONS = [
   { value: AlarmLevel.DANGER, label: '危险' },
   { value: AlarmLevel.CRITICAL, label: '严重' },
 ]
+
+const ALARM_SOUND_ENABLED_KEY = 'alarm-sound-enabled'
 
 const getAlarmTypeLabel = (type: AlarmType): string => {
   switch (type) {
@@ -141,6 +145,45 @@ const formatDateTime = (dateStr: string): string => {
   }
 }
 
+const playAlarmSound = async (): Promise<void> => {
+  if (typeof window === 'undefined') return
+
+  const AudioContextCtor =
+    window.AudioContext ||
+    (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
+
+  if (!AudioContextCtor) return
+
+  const context = new AudioContextCtor()
+  try {
+    if (context.state === 'suspended') {
+      await context.resume()
+    }
+
+    const oscillator = context.createOscillator()
+    const gainNode = context.createGain()
+
+    oscillator.type = 'sine'
+    oscillator.frequency.setValueAtTime(880, context.currentTime)
+    oscillator.frequency.exponentialRampToValueAtTime(1320, context.currentTime + 0.12)
+
+    gainNode.gain.setValueAtTime(0.0001, context.currentTime)
+    gainNode.gain.exponentialRampToValueAtTime(0.08, context.currentTime + 0.02)
+    gainNode.gain.exponentialRampToValueAtTime(0.0001, context.currentTime + 0.36)
+
+    oscillator.connect(gainNode)
+    gainNode.connect(context.destination)
+
+    oscillator.start()
+    oscillator.stop(context.currentTime + 0.38)
+    oscillator.onended = () => {
+      void context.close().catch(() => {})
+    }
+  } catch {
+    void context.close().catch(() => {})
+  }
+}
+
 interface Filters {
   type: string
   level: string
@@ -167,6 +210,8 @@ interface PaginatedResponse {
 export function AlarmCenterPage() {
   const queryClient = useQueryClient()
   const { hasPermission } = useAuthStore()
+  const selectedSiteId = useSiteStore((state) => state.selectedSiteId)
+  const setSelectedSiteId = useSiteStore((state) => state.setSelectedSiteId)
   const canResolve = hasPermission([UserRole.ADMIN, UserRole.BOSS])
 
   const [activeTab, setActiveTab] = useState<'all' | 'unresolved' | 'resolved'>('all')
@@ -176,6 +221,21 @@ export function AlarmCenterPage() {
   const [appliedFilters, setAppliedFilters] = useState<Filters>(DEFAULT_FILTERS)
   const [resolvingId, setResolvingId] = useState<string | null>(null)
   const [isClearing, setIsClearing] = useState(false)
+  const [alarmSoundEnabled, setAlarmSoundEnabled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true
+    try {
+      const stored = localStorage.getItem(ALARM_SOUND_ENABLED_KEY)
+      return stored == null ? true : stored === 'true'
+    } catch {
+      return true
+    }
+  })
+
+  const { data: sites = [] } = useQuery({
+    queryKey: ['system-sites'],
+    queryFn: system.getSites,
+    staleTime: 1000 * 60,
+  })
 
   const resolvedParam: boolean | undefined =
     activeTab === 'all' ? undefined : activeTab === 'resolved'
@@ -183,6 +243,7 @@ export function AlarmCenterPage() {
   const { data, isLoading, isFetching } = useQuery({
     queryKey: [
       'alarms',
+      selectedSiteId ?? 'all',
       page,
       pageSize,
       appliedFilters,
@@ -190,6 +251,7 @@ export function AlarmCenterPage() {
     ],
     queryFn: () =>
       logs.alarms({
+        siteId: selectedSiteId ?? undefined,
         page,
         pageSize,
         type: appliedFilters.type !== 'all' ? (appliedFilters.type as AlarmType) : undefined,
@@ -217,6 +279,7 @@ export function AlarmCenterPage() {
 
   const clearMutation = useMutation({
     mutationFn: (payload: {
+      siteId?: string
       type?: AlarmType
       level?: AlarmLevel
       roomNumber?: string
@@ -243,15 +306,27 @@ export function AlarmCenterPage() {
   })
 
   useEffect(() => {
+    try {
+      localStorage.setItem(ALARM_SOUND_ENABLED_KEY, String(alarmSoundEnabled))
+    } catch {}
+  }, [alarmSoundEnabled])
+
+  useEffect(() => {
     const socket = getSocket()
     const handler = () => {
       queryClient.invalidateQueries({ queryKey: ['alarms'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard-unresolved-alarms'] })
+      queryClient.invalidateQueries({ queryKey: ['sidebar-alarm-summary'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard-summary'] })
+      if (alarmSoundEnabled) {
+        void playAlarmSound()
+      }
     }
     socket.on('alarm:new', handler)
     return () => {
       socket.off('alarm:new', handler)
     }
-  }, [queryClient])
+  }, [alarmSoundEnabled, queryClient])
 
   const handleTabChange = (val: string) => {
     setActiveTab(val as 'all' | 'unresolved' | 'resolved')
@@ -288,6 +363,7 @@ export function AlarmCenterPage() {
 
     setIsClearing(true)
     clearMutation.mutate({
+      siteId: selectedSiteId ?? undefined,
       type: appliedFilters.type !== 'all' ? (appliedFilters.type as AlarmType) : undefined,
       level: appliedFilters.level !== 'all' ? (appliedFilters.level as AlarmLevel) : undefined,
       roomNumber: appliedFilters.roomNumber !== 'all' ? appliedFilters.roomNumber : undefined,
@@ -312,13 +388,13 @@ export function AlarmCenterPage() {
   const renderAlarmTable = () => {
     if (isLoading) {
       return (
-        <div className="p-8 text-center text-muted-foreground">加载中...</div>
+        <div className="p-4 text-center text-muted-foreground">加载中...</div>
       )
     }
 
     if (list.length === 0) {
       return (
-        <div className="p-8 text-center text-muted-foreground">暂无数据</div>
+        <div className="p-4 text-center text-muted-foreground">暂无数据</div>
       )
     }
 
@@ -381,7 +457,7 @@ export function AlarmCenterPage() {
           </TableBody>
         </Table>
 
-        <div className="flex items-center justify-between px-6 py-4 border-t">
+        <div className="flex items-center justify-between border-t px-3 py-3">
           <div className="text-sm text-muted-foreground">
             第 {page} / {totalPages} 页，共 {total} 条记录
           </div>
@@ -409,19 +485,58 @@ export function AlarmCenterPage() {
   }
 
   return (
-    <div className="container mx-auto py-6">
-      <h1 className="text-2xl font-bold mb-2">
-        <Bell className="inline-block mr-2 h-7 w-7" />
-        报警中心
-      </h1>
-      <p className="text-muted-foreground mb-6">
-        这里记录的是预警与异常状态。80% / 90% / 95% 属于预警提醒；达到限额并且系统已自动断电后，会自动闭环，不再要求手工处理。
-      </p>
+    <div className="app-page app-page-stack">
+      <div className="app-page-header">
+        <h1 className="text-2xl font-bold">
+          <Bell className="mr-2 inline-block h-7 w-7" />
+          报警中心
+        </h1>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 rounded-md border px-2.5 py-1.5">
+            <span className="text-sm text-muted-foreground">声音</span>
+            <Switch
+              checked={alarmSoundEnabled}
+              onCheckedChange={setAlarmSoundEnabled}
+              aria-label="报警声音开关"
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={() => {
+                void playAlarmSound()
+              }}
+            >
+              试听
+            </Button>
+          </div>
+          <Select
+            value={selectedSiteId ?? 'all'}
+            onValueChange={(value) => {
+              setSelectedSiteId(value === 'all' ? null : value)
+              setPage(1)
+            }}
+          >
+            <SelectTrigger className="w-[180px]">
+              <SelectValue placeholder="选择区域" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部区域</SelectItem>
+              {sites.map((site) => (
+                <SelectItem key={site.id} value={site.id}>
+                  {site.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
 
-      <Card className="mb-6">
-        <CardContent className="pt-6">
+      <Card>
+        <CardContent className="p-3">
           <div className="overflow-x-auto">
-            <div className="flex min-w-max items-end gap-4">
+            <div className="flex min-w-max items-end gap-2">
               <div className="w-40 space-y-2">
               <Label htmlFor="alarm-type">报警类型</Label>
               <Select
@@ -549,7 +664,7 @@ export function AlarmCenterPage() {
             onValueChange={handleTabChange}
             className="w-full"
           >
-            <div className="px-6 pt-4">
+            <div className="px-3 pt-3">
               <TabsList>
                 <TabsTrigger value="all">全部</TabsTrigger>
                 <TabsTrigger value="unresolved">待关注/待处理</TabsTrigger>

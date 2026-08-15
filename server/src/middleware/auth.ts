@@ -21,7 +21,10 @@ declare global {
 
 export const authenticate = (req: Request, _res: Response, next: NextFunction) => {
   try {
-    const authHeader = req.headers.authorization;
+    let authHeader = req.headers.authorization;
+    if ((!authHeader || !authHeader.startsWith('Bearer ')) && req.query && typeof (req.query as any).token === 'string') {
+      authHeader = `Bearer ${(req.query as any).token}`;
+    }
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       throw new AppError(401, 'UNAUTHORIZED', '未提供认证令牌');
     }

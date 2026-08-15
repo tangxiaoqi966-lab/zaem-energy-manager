@@ -26,9 +26,14 @@ export interface OperationDetailsPayload {
   roomName?: string | null;
   displayName?: string | null;
   did?: string | null;
+  deviceDid?: string | null;
   deviceName?: string | null;
+  adapterKind?: 'huawei_cpe' | 'nokia_beacon' | string | null;
+  adapterBaseUrl?: string | null;
   limitEnabled?: boolean;
   dailyLimit?: number | null;
+  costLimitEnabled?: boolean;
+  monthlyCostLimit?: number | null;
   powerAction?: 'on' | 'off' | null;
   blocked?: boolean;
   retryAfterSeconds?: number | null;
@@ -51,6 +56,10 @@ export interface OperationDetailsPayload {
   failedDevices?: string[] | null;
   failedRooms?: string[] | null;
   skippedRooms?: string[] | null;
+  startedAt?: string | null;
+  recoveredAt?: string | null;
+  durationMinutes?: number | null;
+  resultLabel?: string | null;
   [key: string]: unknown;
 }
 
@@ -61,6 +70,17 @@ export interface OperationTargetInfo {
   deviceName: string | null;
   did: string | null;
 }
+
+export type OperationLogCategory =
+  | 'auth'
+  | 'room_power'
+  | 'network'
+  | 'camera'
+  | 'room'
+  | 'alarm'
+  | 'device_sync'
+  | 'system'
+  | 'other';
 
 export function serializeOperationDetails(
   details: string | OperationDetailsPayload,
@@ -150,6 +170,22 @@ function pushLine(lines: string[], label: string, value: unknown) {
   lines.push(`${label}：${String(value)}`);
 }
 
+function formatDateTimeValue(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const dt = new Date(value);
+  if (Number.isNaN(dt.getTime())) {
+    return value;
+  }
+
+  return new Intl.DateTimeFormat('zh-CN', {
+    dateStyle: 'medium',
+    timeStyle: 'medium',
+  }).format(dt);
+}
+
 function formatRoomLabel(parsed: OperationDetailsPayload): string | null {
   const displayName =
     typeof parsed.displayName === 'string' && parsed.displayName.trim()
@@ -163,21 +199,39 @@ function formatRoomLabel(parsed: OperationDetailsPayload): string | null {
   return displayName || roomNumber;
 }
 
-function formatDeviceLabel(parsed: OperationDetailsPayload): string | null {
-  const deviceName =
-    typeof parsed.deviceName === 'string' && parsed.deviceName.trim()
-      ? parsed.deviceName.trim()
-      : null;
+function normalizeUnknownLabel(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  if (!text) return null;
+  if (/^\*?\s*no company\s*\*?$/i.test(text)) return null;
+  return text;
+}
+
+function getFallbackNetworkDeviceLabel(parsed: OperationDetailsPayload): string | null {
   const did =
-    typeof parsed.did === 'string' && parsed.did.trim()
-      ? parsed.did.trim()
-      : null;
+    normalizeUnknownLabel(parsed.did) ||
+    normalizeUnknownLabel(parsed.deviceDid);
+  if (parsed.adapterKind === 'huawei_cpe') {
+    return did ? `Huawei 主路由 (${did})` : 'Huawei 主路由';
+  }
+  if (parsed.adapterKind === 'nokia_beacon') {
+    return did ? `Nokia Mesh 网关 (${did})` : 'Nokia Mesh 网关';
+  }
+  return null;
+}
+
+function formatDeviceLabel(parsed: OperationDetailsPayload): string | null {
+  const deviceName = normalizeUnknownLabel(parsed.deviceName);
+  const did =
+    normalizeUnknownLabel(parsed.did) ||
+    normalizeUnknownLabel(parsed.deviceDid);
+  const fallbackNetworkLabel = getFallbackNetworkDeviceLabel(parsed);
 
   if (deviceName && did) {
     return `${deviceName} (${did})`;
   }
 
-  return deviceName || did;
+  return deviceName || fallbackNetworkLabel || did;
 }
 
 function formatFilters(filters: Record<string, unknown> | null | undefined): string | null {
@@ -229,14 +283,117 @@ export function getOperationTargetInfo(
         ? parsed.displayName.trim()
         : null,
     deviceName:
-      typeof parsed.deviceName === 'string' && parsed.deviceName.trim()
-        ? parsed.deviceName.trim()
-        : null,
+      normalizeUnknownLabel(parsed.deviceName) || getFallbackNetworkDeviceLabel(parsed),
     did:
       typeof parsed.did === 'string' && parsed.did.trim()
         ? parsed.did.trim()
+        : typeof parsed.deviceDid === 'string' && parsed.deviceDid.trim()
+          ? parsed.deviceDid.trim()
         : null,
   };
+}
+
+export function getOperationCategory(
+  type: OperationType,
+  rawDetails: string | null | undefined,
+): OperationLogCategory {
+  const parsed = parseOperationDetails(rawDetails);
+  if (type === OperationType.login || type === OperationType.logout) {
+    return 'auth';
+  }
+  if (type === OperationType.update_alarm) {
+    return 'alarm';
+  }
+  if (type === OperationType.update_limit || type === OperationType.cutoff_power || type === OperationType.restore_power) {
+    return 'room_power';
+  }
+  if (typeof parsed === 'string') {
+    return type === OperationType.sync_devices ? 'device_sync' : type === OperationType.update_settings ? 'system' : 'other';
+  }
+
+  const action = String(parsed.action ?? '').trim().toLowerCase();
+  const text = [
+    parsed.actionLabel,
+    parsed.deviceName,
+    parsed.displayName,
+    parsed.roomName,
+    parsed.roomNumber,
+    parsed.did,
+    parsed.deviceDid,
+    parsed.adapterKind,
+  ]
+    .filter((value) => typeof value === 'string' && value.trim())
+    .join(' ')
+    .toLowerCase();
+
+  if (
+    parsed.adapterKind === 'huawei_cpe' ||
+    parsed.adapterKind === 'nokia_beacon' ||
+    action === 'save_device_adapter_config' ||
+    action === 'refresh_device_runtime' ||
+    /^lan_/i.test(String(parsed.did ?? parsed.deviceDid ?? '')) ||
+    /mesh|beacon|cpe|router|路由|网关/.test(text)
+  ) {
+    return 'network';
+  }
+
+  if (
+    /camera|摄像/.test(text) ||
+    action.includes('camera')
+  ) {
+    return 'camera';
+  }
+
+  if (
+    action === 'rename_device' ||
+    action === 'update_room_annotation' ||
+    action === 'update_room_floor' ||
+    (!!parsed.roomNumber && type === OperationType.update_settings)
+  ) {
+    return 'room';
+  }
+
+  if (
+    action === 'create_user' ||
+    action === 'update_user' ||
+    action === 'delete_user' ||
+    action === 'force_change_password'
+  ) {
+    return 'auth';
+  }
+
+  if (type === OperationType.sync_devices) {
+    return 'device_sync';
+  }
+
+  if (type === OperationType.update_settings) {
+    return 'system';
+  }
+
+  return 'other';
+}
+
+export function getOperationCategoryLabel(category: OperationLogCategory): string {
+  switch (category) {
+    case 'auth':
+      return '账号登录';
+    case 'room_power':
+      return '房间电力';
+    case 'network':
+      return '网络设备';
+    case 'camera':
+      return '摄像头';
+    case 'room':
+      return '房间信息';
+    case 'alarm':
+      return '报警处理';
+    case 'device_sync':
+      return '设备同步';
+    case 'system':
+      return '系统设置';
+    default:
+      return '其他';
+  }
 }
 
 export function formatOperationDetailsText(
@@ -261,6 +418,7 @@ export function formatOperationDetailsText(
   pushLine(lines, '来源', sourceLabel);
   pushLine(lines, '房间', roomLabel);
   pushLine(lines, '设备', deviceLabel);
+  pushLine(lines, '管理地址', parsed.adapterBaseUrl);
 
   if (parsed.dailyLimit !== undefined && parsed.dailyLimit !== null) {
     pushLine(lines, '限额', `${parsed.dailyLimit} kWh/天`);
@@ -268,6 +426,14 @@ export function formatOperationDetailsText(
 
   if (typeof parsed.limitEnabled === 'boolean') {
     pushLine(lines, '限额断电', parsed.limitEnabled ? '开启' : '关闭');
+  }
+
+  if (parsed.monthlyCostLimit !== undefined && parsed.monthlyCostLimit !== null) {
+    pushLine(lines, '费用限额', `EUR ${parsed.monthlyCostLimit}/月`);
+  }
+
+  if (typeof parsed.costLimitEnabled === 'boolean') {
+    pushLine(lines, '费用断电', parsed.costLimitEnabled ? '开启' : '关闭');
   }
 
   if (parsed.powerAction === 'on' || parsed.powerAction === 'off') {
@@ -286,6 +452,9 @@ export function formatOperationDetailsText(
   pushLine(lines, '失败设备', parsed.failedDevices?.join('，'));
   pushLine(lines, '失败房间', parsed.failedRooms?.join('，'));
   pushLine(lines, '跳过房间', parsed.skippedRooms?.join('，'));
+  pushLine(lines, '开始时间', formatDateTimeValue(parsed.startedAt));
+  pushLine(lines, '恢复时间', formatDateTimeValue(parsed.recoveredAt));
+  pushLine(lines, '持续时长', parsed.durationMinutes != null ? `${parsed.durationMinutes} 分钟` : null);
   pushLine(lines, '登录账号', parsed.username);
   pushLine(lines, '登录地址', parsed.loginAddress || parsed.ip);
   pushLine(lines, '登录设备', parsed.loginDevice || parsed.deviceLabel);
@@ -350,10 +519,16 @@ function inferActionLabel(
       return '自动恢复任务失败';
     case 'auto_restore_task_skipped':
       return '自动恢复任务跳过';
+    case 'auto_restore_task_checked':
+      return '自动恢复任务检查';
     case 'auto_cutoff_skipped':
       return '自动断电跳过';
     case 'auto_restore_skipped':
       return '自动恢复供电跳过';
+    case 'room_offline_detected':
+      return '记录离线异常';
+    case 'room_offline_recovered':
+      return '记录离线恢复';
     case 'manual_cutoff':
       return '手动断电';
     case 'manual_restore':

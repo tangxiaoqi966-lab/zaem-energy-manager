@@ -1,19 +1,27 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query';
-import { BarChart3, LineChart, TrendingUp, Zap, Euro, BatteryCharging } from 'lucide-react';
+import { BarChart3, LineChart, TrendingUp, Zap, Euro, BatteryCharging, Wifi } from 'lucide-react';
 import type { EChartsOption } from 'echarts';
 import * as api from '@/lib/api';
 import { getSocket } from '@/lib/socket';
-import type { DashboardSummary, RoomEnergyDetail } from '@/types';
+import { inferShortDeviceName, type DashboardSummary, type NetworkHistoryResponse, type RoomEnergyDetail } from '@/types';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Badge } from '@/components/ui/badge';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import EChartsBar from '@/components/charts/EChartsBar';
 import EChartsLine from '@/components/charts/EChartsLine';
 import { ValueWithUnit, formatValueUnitHtml } from '@/components/ui/value-with-unit';
 import { FeeHint } from '@/components/ui/fee-hint';
+import { useSiteStore } from '@/store/site';
 
 type PeriodKey = 'day' | 'week' | 'month' | 'year';
+type ChartView = 'energy' | 'network';
 
 interface RankingEntry {
   key: string;
@@ -27,6 +35,43 @@ interface TrendSeries {
   labels: string[];
   energy: number[];
   cost: number[];
+}
+
+interface NetworkSnapshotEntry {
+  key: string;
+  label: string;
+  clientCount: number;
+  dayTrafficGb: number;
+  monthTrafficGb: number;
+  totalTrafficGb: number;
+  downloadMbps: number;
+  uploadMbps: number;
+  peakDownloadMbps: number;
+  peakUploadMbps: number;
+  operator: string | null;
+  networkType: string | null;
+}
+
+interface NetworkRankingEntry {
+  key: string;
+  label: string;
+  value: number;
+  clientCount: number;
+  dayTrafficGb: number;
+  monthTrafficGb: number;
+  totalTrafficGb: number;
+  downloadMbps: number;
+  uploadMbps: number;
+  peakDownloadMbps: number;
+  peakUploadMbps: number;
+}
+
+interface NetworkRankingMeta {
+  title: string;
+  description: string;
+  hint: string;
+  seriesName: string;
+  unit: 'GB' | 'Mbps';
 }
 
 const PERIOD_LABEL: Record<PeriodKey, string> = {
@@ -154,17 +199,26 @@ function buildTrendSeries(
 
 function buildRankingEntries(
   summary: DashboardSummary | undefined,
+  details: RoomEnergyDetail[],
   period: PeriodKey,
   pricePerKwh: number,
 ): RankingEntry[] {
   if (!summary) return [];
   const roomData = Array.isArray(summary.roomData) ? summary.roomData : [];
-  const devices = Array.isArray(summary.devices) ? summary.devices : [];
+  const detailByRoomId = new Map(details.map((detail) => [detail.realtime.roomId, detail]));
 
-  const dayEntries = roomData
+  const roomEntries = roomData
     .filter((room) => room.devices.length > 0)
     .map((room) => {
-      const usage = room.yesterdayUsage;
+      const detail = detailByRoomId.get(room.roomId);
+      const usage =
+        period === 'day'
+          ? room.yesterdayUsage
+          : period === 'week'
+            ? Number((detail?.last7Days.reduce((sum, item) => sum + item.usage, 0) ?? 0).toFixed(3))
+            : period === 'month'
+              ? Number((detail?.last30Days.reduce((sum, item) => sum + item.usage, 0) ?? 0).toFixed(3))
+              : Number((detail?.last12Months.reduce((sum, item) => sum + item.usage, 0) ?? 0).toFixed(3));
 
       return {
         key: room.roomId,
@@ -175,21 +229,7 @@ function buildRankingEntries(
       };
     });
 
-  if (period === 'day') {
-    return dayEntries
-      .filter((item) => item.usage > 0)
-      .sort((a, b) => b.usage - a.usage)
-      .slice(0, 14);
-  }
-
-  return devices
-    .map((device, index) => ({
-      key: device.did,
-      label: device.name || `设备空间 ${index + 1}`,
-      usage: Number((device.totalKwh ?? 0).toFixed(3)),
-      powerW: device.powerW ?? 0,
-      cost: (device.totalKwh ?? 0) * pricePerKwh,
-    }))
+  return roomEntries
     .filter((item) => item.usage > 0)
     .sort((a, b) => b.usage - a.usage)
     .slice(0, 14);
@@ -198,8 +238,8 @@ function buildRankingEntries(
 function getRankingDescription(period: PeriodKey) {
   if (period === 'day') return `按前一天完整日记录排序，当前展示的是 ${getPreviousDayLabel()} 的用电排行。`;
   if (period === 'week') return '按最近 7 天累计用电量排序，适合看最近一周的高耗电房间。';
-  if (period === 'month') return '按最近 30 天累计用电量排序，默认按每台设备一个独立空间展示。';
-  return '按最近 12 个月累计用电量排序，适合看全年高耗电空间走势。';
+  if (period === 'month') return '按最近 30 天累计用电量排序，默认按房间空间展示。';
+  return '按最近 12 个月累计用电量排序，适合看全年高耗电房间走势。';
 }
 
 function getTrendDescription(period: PeriodKey) {
@@ -217,14 +257,190 @@ function getDataHint(period: PeriodKey) {
   return '年视图基于月汇总记录，适合看长期累计变化。';
 }
 
+function getNetworkTrendTitle(period: PeriodKey) {
+  if (period === 'day') return '最近 7 天网络总量';
+  if (period === 'week') return '最近 8 周网络总量';
+  if (period === 'month') return '最近 12 个月网络总量';
+  return '最近 5 年网络总量';
+}
+
+function getNetworkTrendDescription(period: PeriodKey) {
+  if (period === 'day') return '按天展示今天、昨天、前天这一段时间的网络总量变化。';
+  if (period === 'week') return '按 7 天为一组汇总，适合看最近几周的整体网络消耗。';
+  if (period === 'month') return '按月汇总网络总量，适合看长期月度趋势。';
+  return '按年汇总网络总量，适合看长期累计变化。';
+}
+
+
+function buildNetworkEntries(summary: DashboardSummary | undefined): NetworkSnapshotEntry[] {
+  if (!summary?.devices?.length) return [];
+  return summary.devices
+    .filter((device) => ['wifi_ap', 'five_g_cpe'].includes(String((device as any).category ?? 'other')))
+    .map((device) => {
+      const anyDev = device as any;
+      const category = String(anyDev.category ?? 'other') as any;
+      const vendor = anyDev.vendorName ?? anyDev.vendor ?? null;
+      const model = anyDev.fiveGCpe?.model ?? anyDev.wifiAp?.model ?? anyDev.model ?? null;
+      const role = anyDev.adapterKind === 'huawei_cpe' ? 'cpe' : category === 'wifi_ap' ? 'master' : undefined;
+      const shortName = inferShortDeviceName(
+        category,
+        vendor,
+        model,
+        anyDev.name ?? null,
+        anyDev.ipAddress ?? anyDev.ip ?? null,
+        role,
+      ).shortName;
+      const clientCount = Number(
+        anyDev.wifiAp?.clientCount ??
+        anyDev.fiveGCpe?.connectedDevices ??
+        (Array.isArray(anyDev.wifiAp?.clients) ? anyDev.wifiAp.clients.length : 0) ??
+        0,
+      );
+      const dayBytes = Number(anyDev.fiveGCpe?.dayRxBytes ?? 0) + Number(anyDev.fiveGCpe?.dayTxBytes ?? 0);
+      const monthBytes = Number(anyDev.fiveGCpe?.monthRxBytes ?? 0) + Number(anyDev.fiveGCpe?.monthTxBytes ?? 0);
+      const totalBytes = Number(anyDev.fiveGCpe?.totalRxBytes ?? 0) + Number(anyDev.fiveGCpe?.totalTxBytes ?? 0);
+      const monthTrafficGb = monthBytes > 0 ? Number((monthBytes / 1024 / 1024 / 1024).toFixed(2)) : 0;
+      const dayTrafficGb = dayBytes > 0 ? Number((dayBytes / 1024 / 1024 / 1024).toFixed(2)) : 0;
+      const totalTrafficGb = totalBytes > 0 ? Number((totalBytes / 1024 / 1024 / 1024).toFixed(2)) : 0;
+      const downloadMbps = Number(anyDev.fiveGCpe?.downloadMbps ?? 0);
+      const uploadMbps = Number(anyDev.fiveGCpe?.uploadMbps ?? 0);
+      const peakDownloadMbps = Number(anyDev.fiveGCpe?.peakDownloadMbps ?? 0);
+      const peakUploadMbps = Number(anyDev.fiveGCpe?.peakUploadMbps ?? 0);
+      return {
+        key: device.did,
+        label: shortName,
+        clientCount: Number.isFinite(clientCount) ? clientCount : 0,
+        dayTrafficGb,
+        monthTrafficGb,
+        totalTrafficGb,
+        downloadMbps: Number.isFinite(downloadMbps) ? Number(downloadMbps.toFixed(2)) : 0,
+        uploadMbps: Number.isFinite(uploadMbps) ? Number(uploadMbps.toFixed(2)) : 0,
+        peakDownloadMbps: Number.isFinite(peakDownloadMbps) ? Number(peakDownloadMbps.toFixed(2)) : 0,
+        peakUploadMbps: Number.isFinite(peakUploadMbps) ? Number(peakUploadMbps.toFixed(2)) : 0,
+        operator: anyDev.fiveGCpe?.operatorFullname ?? anyDev.fiveGCpe?.operatorShort ?? null,
+        networkType: anyDev.fiveGCpe?.currentRat ?? anyDev.wifiAp?.band ?? null,
+      };
+    })
+    .sort((a, b) => b.clientCount - a.clientCount || b.monthTrafficGb - a.monthTrafficGb);
+}
+
+function buildNetworkRankingEntries(
+  entries: NetworkSnapshotEntry[],
+  period: PeriodKey,
+): { entries: NetworkRankingEntry[]; meta: NetworkRankingMeta } {
+  const hasDayTraffic = entries.some((item) => item.dayTrafficGb > 0);
+
+  if (period === 'day') {
+    const useTraffic = hasDayTraffic;
+    return {
+      entries: entries
+        .map((item) => ({
+          ...item,
+          value: useTraffic
+            ? item.dayTrafficGb
+            : Number((item.downloadMbps + item.uploadMbps).toFixed(2)),
+        }))
+        .filter((item) => item.value > 0)
+        .sort((a, b) => b.value - a.value)
+        .slice(0, 14),
+      meta: useTraffic
+        ? {
+            title: '日网络排行',
+            description: '按今天已累计的网络流量排序，优先展示主路由当天真实流量。',
+            hint: '日视图优先使用今日流量字段；没有返回今日流量的设备会自动排后。',
+            seriesName: '今日流量',
+            unit: 'GB',
+          }
+        : {
+            title: '日网络排行',
+            description: '当前设备没有稳定的今日流量字段，日视图先按实时上下行合计速率排序。',
+            hint: '这里展示的是瞬时总速率，不是全天累计流量。',
+            seriesName: '实时总速率',
+            unit: 'Mbps',
+          },
+    };
+  }
+
+  if (period === 'week') {
+    return {
+      entries: entries
+        .map((item) => ({
+          ...item,
+          value: Number((item.peakDownloadMbps + item.peakUploadMbps).toFixed(2)),
+        }))
+        .filter((item) => item.value > 0)
+        .sort((a, b) => b.value - a.value)
+        .slice(0, 14),
+      meta: {
+        title: '周网络排行',
+        description: '当前还没有最近 7 天的网络历史沉淀，周视图先按本次连接过程里的峰值速率排序。',
+        hint: '周视图现在展示的是当前连接过程里的上下行峰值，不是最近 7 天累计。',
+        seriesName: '峰值总速率',
+        unit: 'Mbps',
+      },
+    };
+  }
+
+  if (period === 'month') {
+    return {
+      entries: entries
+        .map((item) => ({ ...item, value: item.monthTrafficGb }))
+        .filter((item) => item.value > 0)
+        .sort((a, b) => b.value - a.value)
+        .slice(0, 14),
+      meta: {
+        title: '月网络排行',
+        description: '按本月累计流量排序，适合看哪台网络设备本月承载更多流量。',
+        hint: '主路由支持本月流量；拿不到月流量的设备会自动排后。',
+        seriesName: '本月流量',
+        unit: 'GB',
+      },
+    };
+  }
+
+  return {
+    entries: entries
+      .map((item) => ({ ...item, value: item.totalTrafficGb }))
+      .filter((item) => item.value > 0)
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 14),
+    meta: {
+      title: '年网络排行',
+      description: '年视图当前按设备累计总流量排序，先用于看哪台设备长期承载更多流量。',
+      hint: '这里展示的是设备累计总流量，不是自然年的 12 个月汇总。',
+      seriesName: '累计流量',
+      unit: 'GB',
+    },
+  };
+}
+
 export function ChartsPage() {
   const queryClient = useQueryClient();
+  const selectedSiteId = useSiteStore((state) => state.selectedSiteId);
+  const setSelectedSiteId = useSiteStore((state) => state.setSelectedSiteId);
+  const [view, setView] = useState<ChartView>('energy');
   const [period, setPeriod] = useState<PeriodKey>('week');
+  const [networkPeriod, setNetworkPeriod] = useState<PeriodKey>('month');
   const [isNarrow, setIsNarrow] = useState(false);
+  const resolvedSiteId = selectedSiteId ?? undefined;
+
+  const { data: sites = [] } = useQuery({
+    queryKey: ['system-sites'],
+    queryFn: api.system.getSites,
+    staleTime: 1000 * 60,
+  });
+
+  useEffect(() => {
+    if (!selectedSiteId) return;
+    const exists = sites.some((item) => item.id === selectedSiteId);
+    if (!exists) {
+      setSelectedSiteId(null);
+    }
+  }, [selectedSiteId, setSelectedSiteId, sites]);
 
   const { data: summary, isLoading: summaryLoading } = useQuery<DashboardSummary>({
-    queryKey: ['dashboard'],
-    queryFn: () => api.dashboard.get(),
+    queryKey: ['dashboard', resolvedSiteId ?? 'all'],
+    queryFn: () => api.dashboard.get(resolvedSiteId),
     refetchOnWindowFocus: false,
     refetchInterval: 5000,
     refetchIntervalInBackground: true,
@@ -238,10 +454,19 @@ export function ChartsPage() {
     staleTime: 1000 * 60,
   });
 
+  const { data: networkHistory, isLoading: networkHistoryLoading } = useQuery<NetworkHistoryResponse>({
+    queryKey: ['dashboard-network-history', resolvedSiteId ?? 'all'],
+    queryFn: () => api.dashboard.getNetworkHistory(resolvedSiteId),
+    refetchOnWindowFocus: false,
+    refetchInterval: 60_000,
+    refetchIntervalInBackground: true,
+    staleTime: 1000 * 20,
+  });
+
   useEffect(() => {
     const socket = getSocket();
-    const handler = (data: DashboardSummary) => {
-      queryClient.setQueryData(['dashboard'], data);
+    const handler = () => {
+      void queryClient.invalidateQueries({ queryKey: ['dashboard'] });
     };
 
     socket.on('dashboard', handler);
@@ -288,8 +513,8 @@ export function ChartsPage() {
 
   const pricePerKwh = settings?.pricePerKwh ?? 0.6;
   const rankingEntries = useMemo(
-    () => buildRankingEntries(summary, period, pricePerKwh),
-    [summary, period, pricePerKwh],
+    () => buildRankingEntries(summary, roomDetails, period, pricePerKwh),
+    [summary, roomDetails, period, pricePerKwh],
   );
 
   const trendSeries = useMemo(
@@ -319,6 +544,42 @@ export function ChartsPage() {
   const selectedTotalUsage = useMemo(
     () => trendSeries.energy.reduce((sum, value) => sum + value, 0),
     [trendSeries],
+  );
+  const networkEntries = useMemo(
+    () => buildNetworkEntries(summary),
+    [summary],
+  );
+  const totalNetworkClients = useMemo(
+    () => networkEntries.reduce((sum, item) => sum + item.clientCount, 0),
+    [networkEntries],
+  );
+  const totalMonthTrafficGb = useMemo(
+    () => Number(networkEntries.reduce((sum, item) => sum + item.monthTrafficGb, 0).toFixed(2)),
+    [networkEntries],
+  );
+  const totalInstantDownload = useMemo(
+    () => Number(networkEntries.reduce((sum, item) => sum + item.downloadMbps, 0).toFixed(2)),
+    [networkEntries],
+  );
+  const totalInstantUpload = useMemo(
+    () => Number(networkEntries.reduce((sum, item) => sum + item.uploadMbps, 0).toFixed(2)),
+    [networkEntries],
+  );
+  const totalPeakSpeedMbps = useMemo(
+    () => Number(networkEntries.reduce((sum, item) => sum + item.peakDownloadMbps + item.peakUploadMbps, 0).toFixed(2)),
+    [networkEntries],
+  );
+  const { entries: networkRankingEntries, meta: networkRankingMeta } = useMemo(
+    () => buildNetworkRankingEntries(networkEntries, networkPeriod),
+    [networkEntries, networkPeriod],
+  );
+  const totalSelectedNetworkMetric = useMemo(
+    () => Number(networkRankingEntries.reduce((sum, item) => sum + item.value, 0).toFixed(2)),
+    [networkRankingEntries],
+  );
+  const networkTrendSeries = useMemo(
+    () => networkHistory?.[networkPeriod] ?? [],
+    [networkHistory, networkPeriod],
   );
 
   const rankingOption = useMemo<EChartsOption>(() => {
@@ -597,108 +858,295 @@ export function ChartsPage() {
     };
   }, [isNarrow, period, trendSeries]);
 
+  const networkTrendOption = useMemo<EChartsOption>(() => {
+    if (networkTrendSeries.length === 0) {
+      return {
+        title: {
+          text: '网络历史开始积累后，这里会显示趋势图',
+          left: 'center',
+          top: 'center',
+          textStyle: { color: '#9ca3af', fontSize: 14, fontWeight: 400 },
+        },
+      };
+    }
+
+    return {
+      tooltip: {
+        trigger: 'axis',
+        triggerOn: 'mousemove|click',
+        confine: true,
+        enterable: false,
+        formatter: (params: unknown) => {
+          const list = params as Array<{ axisValue: string; seriesName: string; value: number }>;
+          const item = list[0];
+          return [
+            `${item?.axisValue ?? ''}`,
+            `网络总量: <b>${numberFormatter2.format(Number(item?.value ?? 0))} GB</b>`,
+          ].join('<br/>');
+        },
+      },
+      grid: {
+        left: 24,
+        right: 24,
+        top: 56,
+        bottom: isNarrow ? 72 : 36,
+        containLabel: true,
+      },
+      xAxis: {
+        type: 'category',
+        data: networkTrendSeries.map((item) => item.label),
+        axisLabel: {
+          color: '#6b7280',
+          fontSize: isNarrow ? 10 : 11,
+          interval:
+            networkPeriod === 'month'
+              ? (isNarrow ? 2 : 1)
+              : networkTrendSeries.length > (isNarrow ? 8 : 12)
+                ? 1
+                : 0,
+          rotate: isNarrow ? 24 : 0,
+          hideOverlap: true,
+          margin: 12,
+          formatter: (value: string) => shortenAxisLabel(value, isNarrow ? 8 : 14),
+        },
+        axisLine: { lineStyle: { color: '#e5e7eb' } },
+      },
+      yAxis: {
+        type: 'value',
+        name: 'GB',
+        nameLocation: 'end',
+        nameGap: 18,
+        nameTextStyle: { color: '#9ca3af', fontSize: 11 },
+        axisLabel: {
+          color: '#6b7280',
+          formatter: (value: number) => numberFormatter2.format(value),
+        },
+        splitLine: { lineStyle: { color: '#f3f4f6', type: 'dashed' } },
+      },
+      series: [
+        {
+          name: '网络总量',
+          type: 'line',
+          smooth: true,
+          symbol: 'circle',
+          symbolSize: 8,
+          data: networkTrendSeries.map((item) => item.usage),
+          lineStyle: { width: 3, color: '#0ea5e9' },
+          itemStyle: { color: '#0ea5e9' },
+          areaStyle: {
+            color: {
+              type: 'linear',
+              x: 0,
+              y: 0,
+              x2: 0,
+              y2: 1,
+              colorStops: [
+                { offset: 0, color: 'rgba(14, 165, 233, 0.22)' },
+                { offset: 1, color: 'rgba(14, 165, 233, 0.03)' },
+              ],
+            },
+          },
+        },
+      ],
+    };
+  }, [isNarrow, networkPeriod, networkTrendSeries]);
+
   const loading = summaryLoading || (mappedRooms.length > 0 && roomDetailQueries.some((query) => query.isLoading && !query.data));
+  const networkLoading = summaryLoading || networkHistoryLoading;
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-start gap-3">
+    <div className="app-page app-page-stack">
+      <div className="app-page-header items-start">
         <div className="rounded-lg bg-indigo-500/10 p-2 text-indigo-600">
           <BarChart3 className="h-6 w-6" />
         </div>
-        <div className="min-w-0">
+        <div className="min-w-0 flex flex-wrap items-center gap-2">
           <h1 className="text-xl font-bold tracking-tight sm:text-2xl">图表</h1>
-          <p className="text-sm text-muted-foreground">
-            统一查看用电排行、周期趋势、参考费用和当前总功率
-          </p>
+          <Tabs value={view} onValueChange={(value) => setView(value as ChartView)}>
+            <TabsList className="grid h-auto w-[140px] grid-cols-2">
+              <TabsTrigger value="energy" className="px-2 text-xs sm:text-sm">电量</TabsTrigger>
+              <TabsTrigger value="network" className="px-2 text-xs sm:text-sm">网络</TabsTrigger>
+            </TabsList>
+          </Tabs>
+        </div>
+        <div className="ml-auto min-w-[140px]">
+          <Select
+            value={selectedSiteId ?? 'all'}
+            onValueChange={(value) => setSelectedSiteId(value === 'all' ? null : value)}
+          >
+            <SelectTrigger className="rounded-full">
+              <SelectValue placeholder="选择区域" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">全部区域</SelectItem>
+              {sites.map((site) => (
+                <SelectItem key={site.id} value={site.id}>
+                  {site.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
       </div>
 
-      <Tabs value={period} onValueChange={(value) => setPeriod(value as PeriodKey)} className="space-y-6">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <TabsList className="grid h-auto w-full max-w-md grid-cols-4">
-            <TabsTrigger value="day" className="px-2 text-xs sm:text-sm">日</TabsTrigger>
-            <TabsTrigger value="week" className="px-2 text-xs sm:text-sm">周</TabsTrigger>
-            <TabsTrigger value="month" className="px-2 text-xs sm:text-sm">月</TabsTrigger>
-            <TabsTrigger value="year" className="px-2 text-xs sm:text-sm">年</TabsTrigger>
-          </TabsList>
-          <Badge variant="outline" className="text-xs">
-            当前查看：{PERIOD_LABEL[period]}视图
-          </Badge>
-        </div>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <TrendingUp className="h-5 w-5 text-indigo-600" />
-              {PERIOD_LABEL[period]}用电排行
-            </CardTitle>
-            <CardDescription>{getRankingDescription(period)}</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {loading ? (
-              <div className="h-[460px] w-full animate-pulse rounded-md bg-muted" />
-            ) : (
-              <EChartsBar option={rankingOption} style={{ width: '100%', height: 460 }} />
-            )}
-            {isNarrow ? (
-              <div className="text-xs text-muted-foreground">
-                手机端点一下柱子即可查看详细数值，再点别处可收起提示。
-              </div>
-            ) : null}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <LineChart className="h-5 w-5 text-indigo-600" />
-              {PERIOD_LABEL[period]}趋势与费用
-            </CardTitle>
-            <CardDescription>{getTrendDescription(period)}</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
-              <div className="rounded-lg border bg-muted/30 p-4">
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Zap className="h-4 w-4 text-indigo-600" />
-                  当前总功率
+      <Tabs value={view} onValueChange={(value) => setView(value as ChartView)} className="space-y-3">
+        {view === 'network' ? (
+          <Card>
+            <CardHeader className="space-y-1 px-3 py-2">
+              <CardTitle className="flex items-center gap-2 text-base">
+                <Wifi className="h-4 w-4 text-sky-600" />
+                网络概览
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="px-3 pb-3 pt-0">
+              <div className="grid grid-cols-2 gap-2 md:grid-cols-5">
+                <div className="rounded-lg border bg-muted/30 px-2.5 py-2">
+                  <div className="text-xs text-muted-foreground">网络设备</div>
+                  <div className="mt-1 text-lg font-semibold">{networkEntries.length}</div>
                 </div>
-                <div className="mt-2 text-2xl font-semibold">{formatPower(totalPowerW)}</div>
-              </div>
-              <div className="rounded-lg border bg-muted/30 p-4">
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <BatteryCharging className="h-4 w-4 text-indigo-600" />
-                  当前用电量
+                <div className="rounded-lg border bg-muted/30 px-2.5 py-2">
+                  <div className="text-xs text-muted-foreground">挂载设备</div>
+                  <div className="mt-1 text-lg font-semibold">{totalNetworkClients}</div>
                 </div>
-                <div className="mt-2 text-2xl font-semibold">{formatEnergy(totalCumulativeKwh)}</div>
-              </div>
-              <FeeHint pricePerKwh={pricePerKwh}>
-                <div className="col-span-2 cursor-help rounded-lg border bg-muted/30 p-4 md:col-span-1">
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <Euro className="h-4 w-4 text-indigo-600" />
-                    {PERIOD_LABEL[period]}参考费用
+                <div className="rounded-lg border bg-muted/30 px-2.5 py-2">
+                  <div className="text-xs text-muted-foreground">瞬时下行</div>
+                  <div className="mt-1 text-sm font-semibold sm:text-base">{numberFormatter2.format(totalInstantDownload)} Mbps</div>
+                </div>
+                <div className="rounded-lg border bg-muted/30 px-2.5 py-2">
+                  <div className="text-xs text-muted-foreground">瞬时上行</div>
+                  <div className="mt-1 text-sm font-semibold sm:text-base">{numberFormatter2.format(totalInstantUpload)} Mbps</div>
+                </div>
+                <div className="rounded-lg border bg-muted/30 px-2.5 py-2">
+                  <div className="text-xs text-muted-foreground">{networkRankingMeta.seriesName}</div>
+                  <div className="mt-1 text-sm font-semibold sm:text-base">
+                    {numberFormatter2.format(
+                      networkPeriod === 'month'
+                        ? totalMonthTrafficGb
+                        : networkPeriod === 'week'
+                          ? totalPeakSpeedMbps
+                          : totalSelectedNetworkMetric,
+                    )} {networkPeriod === 'week' ? 'Mbps' : networkRankingMeta.unit}
                   </div>
-                  <div className="mt-2 text-2xl font-semibold">{formatCost(selectedTotalUsage * pricePerKwh)}</div>
                 </div>
-              </FeeHint>
-            </div>
-
-            <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
-              {getDataHint(period)}
-            </div>
-
-            {loading ? (
-              <div className="h-[460px] w-full animate-pulse rounded-md bg-muted" />
-            ) : (
-              <EChartsLine option={trendOption} style={{ width: '100%', height: 460 }} />
-            )}
-            {isNarrow ? (
-              <div className="text-xs text-muted-foreground">
-                手机端点一下折线节点即可查看详细数值，左右拖动也能连续看各时间点。
               </div>
-            ) : null}
-          </CardContent>
-        </Card>
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {view === 'energy' ? (
+          <Tabs value={period} onValueChange={(value) => setPeriod(value as PeriodKey)} className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <TabsList className="grid h-auto w-full max-w-md grid-cols-4">
+                <TabsTrigger value="day" className="px-2 text-xs sm:text-sm">日</TabsTrigger>
+                <TabsTrigger value="week" className="px-2 text-xs sm:text-sm">周</TabsTrigger>
+                <TabsTrigger value="month" className="px-2 text-xs sm:text-sm">月</TabsTrigger>
+                <TabsTrigger value="year" className="px-2 text-xs sm:text-sm">年</TabsTrigger>
+              </TabsList>
+            </div>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <TrendingUp className="h-5 w-5 text-indigo-600" />
+                  {PERIOD_LABEL[period]}用电排行
+                </CardTitle>
+                <CardDescription>{getRankingDescription(period)}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {loading ? (
+                  <div className="h-[460px] w-full animate-pulse rounded-md bg-muted" />
+                ) : (
+                  <EChartsBar option={rankingOption} style={{ width: '100%', height: 460 }} />
+                )}
+                {isNarrow ? (
+                  <div className="text-xs text-muted-foreground">
+                    手机端点一下柱子即可查看详细数值，再点别处可收起提示。
+                  </div>
+                ) : null}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <LineChart className="h-5 w-5 text-indigo-600" />
+                  {PERIOD_LABEL[period]}趋势与费用
+                </CardTitle>
+                <CardDescription>{getTrendDescription(period)}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <div className="grid grid-cols-2 gap-2 md:grid-cols-3">
+                  <div className="rounded-lg border bg-muted/30 p-2.5">
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <Zap className="h-4 w-4 text-indigo-600" />
+                      当前总功率
+                    </div>
+                    <div className="mt-1 text-xl font-semibold">{formatPower(totalPowerW)}</div>
+                  </div>
+                  <div className="rounded-lg border bg-muted/30 p-2.5">
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <BatteryCharging className="h-4 w-4 text-indigo-600" />
+                      当前用电量
+                    </div>
+                    <div className="mt-1 text-xl font-semibold">{formatEnergy(totalCumulativeKwh)}</div>
+                  </div>
+                  <FeeHint pricePerKwh={pricePerKwh}>
+                    <div className="col-span-2 cursor-help rounded-lg border bg-muted/30 p-2.5 md:col-span-1">
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <Euro className="h-4 w-4 text-indigo-600" />
+                        {PERIOD_LABEL[period]}参考费用
+                      </div>
+                      <div className="mt-1 text-xl font-semibold">{formatCost(selectedTotalUsage * pricePerKwh)}</div>
+                    </div>
+                  </FeeHint>
+                </div>
+
+                <div className="rounded-lg border border-dashed bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                  {getDataHint(period)}
+                </div>
+
+                {loading ? (
+                  <div className="h-[460px] w-full animate-pulse rounded-md bg-muted" />
+                ) : (
+                  <EChartsLine option={trendOption} style={{ width: '100%', height: 460 }} />
+                )}
+                {isNarrow ? (
+                  <div className="text-xs text-muted-foreground">
+                    手机端点一下折线节点即可查看详细数值，左右拖动也能连续看各时间点。
+                  </div>
+                ) : null}
+              </CardContent>
+            </Card>
+          </Tabs>
+        ) : (
+          <Tabs value={networkPeriod} onValueChange={(value) => setNetworkPeriod(value as PeriodKey)} className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <TabsList className="grid h-auto w-full max-w-md grid-cols-4">
+                <TabsTrigger value="day" className="px-2 text-xs sm:text-sm">日</TabsTrigger>
+                <TabsTrigger value="week" className="px-2 text-xs sm:text-sm">周</TabsTrigger>
+                <TabsTrigger value="month" className="px-2 text-xs sm:text-sm">月</TabsTrigger>
+                <TabsTrigger value="year" className="px-2 text-xs sm:text-sm">年</TabsTrigger>
+              </TabsList>
+            </div>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <LineChart className="h-5 w-5 text-sky-600" />
+                  {getNetworkTrendTitle(networkPeriod)}
+                </CardTitle>
+                <CardDescription>{getNetworkTrendDescription(networkPeriod)}</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                {networkLoading ? (
+                  <div className="h-[460px] w-full animate-pulse rounded-md bg-muted" />
+                ) : (
+                  <EChartsLine option={networkTrendOption} style={{ width: '100%', height: 460 }} />
+                )}
+              </CardContent>
+            </Card>
+          </Tabs>
+        )}
       </Tabs>
     </div>
   );
