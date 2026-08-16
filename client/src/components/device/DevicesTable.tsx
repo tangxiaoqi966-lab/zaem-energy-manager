@@ -16,7 +16,7 @@ import * as api from '@/lib/api';
 import { useAuthStore } from '@/store/auth';
 import { UserRole, DeviceStatus as DS } from '@/types';
 import type { DeviceItem, DeviceStatus } from '@/types';
-import { ValueWithUnit } from '../ui/value-with-unit';
+import { formatPower as formatPowerShared, formatEnergy as formatEnergyShared } from '@/lib/format';
 
 const statusVariant: Record<DeviceStatus, 'success' | 'danger' | 'default'> = {
   [DS.ONLINE]: 'success',
@@ -65,34 +65,12 @@ interface DevicesTableProps {
   compact?: boolean;
 }
 
-const powerFormatter = new Intl.NumberFormat('de-AT', {
-  minimumFractionDigits: 1,
-  maximumFractionDigits: 1,
-});
-
-const numberFormatter2 = new Intl.NumberFormat('de-AT', {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
 function formatPower(value: number) {
-  return (
-    <ValueWithUnit
-      value={powerFormatter.format(value)}
-      unit="W"
-      valueClassName="font-mono font-semibold"
-    />
-  );
+  return formatPowerShared(value, { valueClassName: 'font-mono font-semibold' });
 }
 
 function formatEnergy(value: number) {
-  return (
-    <ValueWithUnit
-      value={numberFormatter2.format(value)}
-      unit="kWh"
-      valueClassName="font-mono font-semibold"
-    />
-  );
+  return formatEnergyShared(value, 2, { valueClassName: 'font-mono font-semibold' });
 }
 
 export function DevicesTable({ devices, invalidateOnChange, compact = false }: DevicesTableProps) {

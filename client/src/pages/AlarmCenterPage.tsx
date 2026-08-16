@@ -28,6 +28,15 @@ import { logs, system } from '../lib/api'
 import { getSocket } from '../lib/socket'
 import { useAuthStore } from '../store/auth'
 import { useSiteStore } from '../store/site'
+import { formatDateTime as formatDateTimeShared } from '../lib/format'
+import {
+  getAlarmTypeLabel,
+  getAlarmLevelLabel,
+  getAlarmLevelBadge,
+  isWarningAlarm,
+  ALARM_TYPE_LABEL,
+  ALARM_LEVEL_LABEL,
+} from '../lib/status-maps'
 import {
   AlarmType,
   AlarmLevel,
@@ -38,81 +47,21 @@ import {
 
 const ALARM_TYPE_OPTIONS = [
   { value: 'all', label: '全部类型' },
-  { value: AlarmType.LIMIT_80, label: '80% 用电预警' },
-  { value: AlarmType.LIMIT_90, label: '90% 用电预警' },
-  { value: AlarmType.LIMIT_95, label: '95% 用电预警' },
-  { value: AlarmType.LIMIT_REACHED, label: '达到限额' },
-  { value: AlarmType.DEVICE_OFFLINE, label: '设备离线' },
-  { value: AlarmType.CONTROL_FAILED, label: '控制失败' },
-  { value: AlarmType.SYNC_FAILED, label: '同步失败' },
+  ...Object.entries(ALARM_TYPE_LABEL).map(([value, label]) => ({
+    value: value as AlarmType,
+    label,
+  })),
 ]
 
 const ALARM_LEVEL_OPTIONS = [
   { value: 'all', label: '全部级别' },
-  { value: AlarmLevel.INFO, label: '信息' },
-  { value: AlarmLevel.WARNING, label: '警告' },
-  { value: AlarmLevel.DANGER, label: '危险' },
-  { value: AlarmLevel.CRITICAL, label: '严重' },
+  ...Object.entries(ALARM_LEVEL_LABEL).map(([value, label]) => ({
+    value: value as AlarmLevel,
+    label,
+  })),
 ]
 
 const ALARM_SOUND_ENABLED_KEY = 'alarm-sound-enabled'
-
-const getAlarmTypeLabel = (type: AlarmType): string => {
-  switch (type) {
-    case AlarmType.LIMIT_80:
-      return '80% 用电预警'
-    case AlarmType.LIMIT_90:
-      return '90% 用电预警'
-    case AlarmType.LIMIT_95:
-      return '95% 用电预警'
-    case AlarmType.LIMIT_REACHED:
-      return '达到限额'
-    case AlarmType.DEVICE_OFFLINE:
-      return '设备离线'
-    case AlarmType.CONTROL_FAILED:
-      return '控制失败'
-    case AlarmType.SYNC_FAILED:
-      return '同步失败'
-    default:
-      return type
-  }
-}
-
-const getAlarmLevelBadge = (
-  level: AlarmLevel
-): 'secondary' | 'default' | 'destructive' => {
-  switch (level) {
-    case AlarmLevel.INFO:
-      return 'secondary'
-    case AlarmLevel.WARNING:
-      return 'default'
-    case AlarmLevel.DANGER:
-    case AlarmLevel.CRITICAL:
-      return 'destructive'
-    default:
-      return 'secondary'
-  }
-}
-
-const getAlarmLevelLabel = (level: AlarmLevel): string => {
-  switch (level) {
-    case AlarmLevel.INFO:
-      return '信息'
-    case AlarmLevel.WARNING:
-      return '警告'
-    case AlarmLevel.DANGER:
-      return '危险'
-    case AlarmLevel.CRITICAL:
-      return '严重'
-    default:
-      return level
-  }
-}
-
-const isWarningAlarm = (type: AlarmType): boolean =>
-  type === AlarmType.LIMIT_80 ||
-  type === AlarmType.LIMIT_90 ||
-  type === AlarmType.LIMIT_95
 
 const getAlarmStatusLabel = (item: AlarmLogResponse): string => {
   if (item.resolved) {
@@ -135,14 +84,7 @@ const getAlarmStatusVariant = (
 }
 
 const formatDateTime = (dateStr: string): string => {
-  try {
-    return new Intl.DateTimeFormat('zh-CN', {
-      dateStyle: 'medium',
-      timeStyle: 'medium',
-    }).format(new Date(dateStr))
-  } catch {
-    return dateStr
-  }
+  return formatDateTimeShared(dateStr);
 }
 
 const playAlarmSound = async (): Promise<void> => {

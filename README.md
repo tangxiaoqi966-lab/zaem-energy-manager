@@ -1,382 +1,320 @@
 # ZHIRAI Apartment Energy Manager
 
-ZHIRAI Apartment Energy Manager 是一套给公寓、宿舍、出租房、多房间空间做集中用电管理的系统。它把 Xiaomi / Mi Home 智能通断器接进来后，能把原本分散在米家里的设备状态、实时功率、今日用电、历史电量、超额报警、手动断电、自动恢复这些能力，统一放到一个网页后台里。
+ZHIRAI Apartment Energy Manager is a centralized web platform for apartment, dormitory, rental, and multi-room electricity management. It connects Xiaomi / Mi Home power control devices and turns scattered device status, real-time power, daily consumption, historical energy, alerts, manual cut-off, and automatic restore flows into a single operational dashboard.
 
-简单说，这套系统解决的是这几个实际问题：
+In practical terms, the project is built to solve these problems:
 
-- 房间多，设备多，想在一个后台里统一看
-- 想知道每个房间今天到底用了多少电，而不是只看一个瞬时功率
-- 想给每个房间设置单独日限额，到了就自动断电
-- 想在第二天自动恢复，不用人工一个个开
-- 想看报警、历史趋势、操作记录，而不是只会开关电源
-- 想在手机上也能直接操作，不想专门做 App
+- Too many rooms and devices to manage from separate apps
+- The need to track real daily energy usage instead of only instantaneous power
+- Room-level daily energy limits with automatic power cut-off
+- Automatic next-day power recovery without manual intervention
+- Alerting, historical trends, and audit logs in one place
+- Direct mobile browser access without maintaining a separate native app
 
-适用关键词：`Xiaomi`、`Mi Home`、`Apartment Energy Manager`、`Smart Power Control`、`Room Electricity Dashboard`、`Energy Control Platform`
+Keywords: `Xiaomi`, `Mi Home`, `Apartment Energy Manager`, `Smart Power Control`, `Room Electricity Dashboard`, `Energy Control Platform`
 
-## 最近更新
+## Latest Updates
 
-最新更新说明已整理到 [`CHANGELOG.md`](./CHANGELOG.md)。
+The latest update notes are maintained in [`CHANGELOG.md`](./CHANGELOG.md).
 
-本轮重点更新包括：
+Recent highlights include:
 
-- 修复远程前端错误连接静态站自身 `/api` 和 `/socket.io` 的问题
-- 重新梳理远程前端构建参数，确保 API 与 WebSocket 指向真实后端入口
-- 仪表盘顶部报警摘要改成双卡片展示：
-  - 一边显示最新报警
-  - 一边显示已超额并已断电的房间
-- 最新报警支持短暂停留后自动消失，避免长期占用顶部空间
-- 报警中心语义优化：
-  - 预警显示为“待关注”
-  - 故障类显示为“待处理”
-  - 已自动断电或已恢复后的记录自动闭环
-- 操作日志改为更易读的人话内容，明确区分：
-  - 自动断电 / 手动断电
-  - 网页-PC / 网页-手机 / APP / 系统自动
-  - 成功 / 失败 / 失败原因
-  - 登录地址 / 登录设备
-- 仪表盘、报警中心、操作日志的筛选与展示细节继续优化
+- Refined Xiaomi account sync and multi-region login handling
+- Improved cumulative energy parsing and database write guards for smart breakers
+- Added stronger offline detection for missing Xiaomi devices
+- Reworked dashboard alert summaries and alarm-center behavior
+- Improved audit logs and operation-source labeling
+- Continued cleanup of duplicated logic across client and server modules
 
-## 这套系统到底能干什么
+## What This System Does
 
-如果你是第一次看这个项目，最直接的理解方式就是看“买来之后你能用它做什么”。
+If you are seeing this repository for the first time, the simplest way to understand it is to look at what you can actually do with it.
 
-### 1. 统一接入米家设备
+### 1. Connect Xiaomi / Mi Home Devices
 
-系统可以接入 Xiaomi / Mi Home 账号，把通断器、插座这一类设备同步到本系统里。
+The system can sign in to Xiaomi / Mi Home, discover supported devices, and sync them into this platform.
 
-接入后你可以做到：
+After connection, you can:
 
-- 在系统里查看设备是否在线
-- 把设备映射到具体房间或空间
-- 从系统里刷新同步设备状态
-- 不用一直在米家 App 和后台之间来回切
+- Check whether each device is online
+- Map devices to rooms or spaces
+- Refresh synced device status from the management system
+- Avoid switching back and forth between Mi Home and the admin dashboard
 
-当前系统支持的登录流程包括：
+Supported login flows currently include:
 
-- 账号密码登录
-- 会话方式登录
-- 邮箱验证码验证流程
+- Username and password login
+- Session-based login
+- Email verification code flow
+- Browser-based security verification flow
 
-这意味着它不只是一个静态展示面板，而是真的带设备接入能力。
+This means the project is not just a static dashboard. It includes a real device-ingestion pipeline.
 
-### 2. 首页仪表盘直接看全局状态
+### 2. Dashboard-First Global View
 
-用户打开系统后，第一眼看到的是仪表盘，不需要先点很多层菜单。
+The dashboard is designed to expose the full operational picture immediately.
 
-仪表盘能直接看到：
+It shows:
 
-- 今日总用电
-- 今日总费用
-- 在线 / 离线设备数量
-- 未处理报警数量
-- 最新一条报警信息
-- 每个房间当前实时功率
-- 每个房间今天已经用了多少电
-- 每个房间当前日限额是多少
-- 每个房间当前是否已经断电
-- 每个房间的限额断电开关是否开启
+- Total energy used today
+- Total cost today
+- Online and offline device counts
+- Unresolved alert counts
+- The latest alert
+- Real-time room power
+- Per-room daily energy usage
+- Per-room daily limit
+- Per-room cut-off state
+- Per-room limit enforcement toggle
 
-也就是说，用户一进系统，不是只看到几个空壳数字，而是能马上知道“现在哪几个房间在耗电、哪个房间快超额、哪个房间已经断电、现在要不要处理报警”。
+The goal is to let an operator instantly see which rooms are actively consuming power, which ones are close to limit, which ones have already been cut off, and whether action is needed.
 
-### 3. 每个房间都能单独管理
+### 3. Room-Level Control
 
-系统不是按“一个总表”那种粗放方式做的，而是按房间 / 空间维度管理。
+The system is organized by room or space instead of a single coarse total meter view.
 
-每个房间卡片上都能直接做这些操作：
+Each room card can directly support:
 
-- 修改空间名称
-- 查看实时功率
-- 查看累计电量
-- 查看今日用电 / 日限额
-- 修改日限额
-- 开启或关闭限额断电
-- 手动立即断电
-- 点击进入详情页看完整历史数据
+- Renaming the room or space
+- Viewing real-time power
+- Viewing cumulative energy
+- Viewing today’s usage versus the daily limit
+- Editing the daily limit
+- Enabling or disabling automatic cut-off
+- Manually cutting power immediately
+- Opening the detail page for historical data
 
-这点对真实使用很关键，因为多房间场景不是所有房间都一样：
+This matters in real deployments because different rooms usually need different limits, policies, and interventions.
 
-- 有的房间限额要高一点
-- 有的房间只是看数据，不自动断电
-- 有的房间临时要手动断电
-- 有的房间要改成更容易识别的名字
+### 4. Automatic Cut-Off, Not Just Monitoring
 
-系统现在就是按这种“每个房间都能单独控制”的方式做的。
+This is not only a monitoring tool. It is also an execution system.
 
-### 4. 支持自动断电，不只是看数据
+Each room can be assigned its own daily limit, for example:
 
-很多系统只能“看”，不能“管”。这个项目不一样，它的核心能力之一就是按规则执行。
+- Room A: `10 kWh / day`
+- Room B: `8 kWh / day`
+- Room C: `15 kWh / day`
 
-你可以给每个房间设置单独的每日限额，例如：
+Once limit enforcement is enabled, the platform will:
 
-- 房间 A：10 kWh / 天
-- 房间 B：8 kWh / 天
-- 房间 C：15 kWh / 天
+- Continuously track the room’s daily usage
+- Trigger warnings at configured thresholds
+- Cut power automatically once the limit is fully reached
+- Write both an alert record and an operation log
 
-然后再决定这个房间要不要开启“限额断电”。
+### 5. Automatic Next-Day Recovery
 
-开启之后，系统会：
+Automatic cut-off is incomplete without a recovery flow.
 
-- 实时计算今天已使用电量
-- 达到阈值时触发报警
-- 达到 100% 限额后自动断电
-- 同时写入报警记录和操作日志
+The project includes a full business-day reset pipeline:
 
-这不是“提醒一下算了”，而是真正能触发动作的业务系统。
+- The daily reset time is configurable in system settings
+- A new business day triggers reset logic
+- Rooms that were cut off because of limit enforcement can be restored automatically
 
-### 5. 支持次日自动恢复供电
+### 6. Energy Statistics Prefer Real Cumulative Values
 
-自动断电如果没有恢复机制，用户第二天还得自己一个个去开，那就不完整。
+One of the most important design choices in this project is that energy statistics should not rely on naive power-times-time estimates.
 
-这个系统已经带了“每日清零 + 自动恢复”的完整链路：
+The system prefers real cumulative device readings whenever possible, in order to reduce:
 
-- 系统设置里可以配置每日清零时间
-- 到达新的业务日后，系统会执行重置逻辑
-- 前一天因限额自动断电的房间，可以自动恢复供电
+- Drift caused by power fluctuations
+- Missing data when the page is not open
+- Artificial jumps caused by refresh timing
+- Mismatch between daily totals and the device’s actual meter data
 
-所以它不是只做了前半段“断电”，而是把“断电 -> 次日恢复”整套流程都考虑到了。
+Current statistics include:
 
-### 6. 电量统计不是假估算，而是尽量走真实累计值
+- Today
+- Yesterday comparison
+- Month-to-date
+- Year-to-date
+- 24-hour trend
+- 7-day trend
+- 30-day trend
+- 12-month trend
+- Room ranking
+- Cost trend
 
-这个项目比较重要的一点是：用电统计不是单纯拿瞬时功率乘时间瞎估。
+### 7. Dedicated Trend Charts
 
-系统会尽量基于设备真实累计电量数据来做统计，尽量避免这些常见问题：
+The chart page is intended for long-term analysis, not just decoration.
 
-- 实时功率波动导致统计误差越来越大
-- 页面没开着就不记录
-- 刷新一次才跳一次数值
-- 当天数据和设备真实表计对不上
+It is used to:
 
-现在系统提供的统计能力包括：
+- Observe day, week, month, and year trends
+- Compare room rankings
+- Analyze energy and cost changes
+- Spot rooms with abnormal increases
 
-- 今日用电
-- 昨日对比
-- 本月累计
-- 本年累计
-- 24 小时曲线
-- 最近 7 天曲线
-- 最近 30 天曲线
-- 最近 12 个月曲线
-- 房间排行
-- 费用趋势
+This is especially useful for operators who need to manage ongoing electricity behavior across multiple rooms.
 
-也就是说，用户不是只能看“当前 300W”，而是能知道：
+### 8. Per-Room Detail Pages
 
-- 今天已经用了多少度
-- 最近几天变化怎么样
-- 哪个房间最耗电
-- 大概花了多少钱
+Dashboard cards are for fast actions. Room detail pages are for full-room context.
 
-### 7. 图表页不是摆设，是真能看趋势
+A room detail page can show:
 
-系统专门有图表页，不是把所有东西都堆在首页。
+- Current real-time power
+- Voltage and current readings
+- Today’s usage
+- Yesterday / month / year comparisons
+- 24-hour, 7-day, 30-day, and 12-month trends
+- Device status
+- Current power supply state
 
-图表页可以用来做这些事：
+It also supports direct actions such as:
 
-- 看日 / 周 / 月 / 年不同维度的趋势
-- 看各房间排行
-- 看电量变化和费用变化
-- 对比最近一段时间哪些房间更耗电
+- Manual cut-off
+- Restore power
+- Rename room or space
 
-这对“运营型使用场景”很有用，比如：
+### 9. Centralized Alert Center
 
-- 房东 / 管理员想看整体能耗变化
-- 想发现哪几间最近异常增加
-- 想知道限额策略是不是有效
+The system supports automatic alerts based on energy usage ratio thresholds.
 
-### 8. 房间详情页看单个房间的完整数据
+Current built-in thresholds include:
 
-首页卡片负责“快速看和快速操作”，房间详情页负责“看完整信息”。
+- `80%`
+- `90%`
+- `95%`
 
-进入房间详情后，用户可以看到：
+Once triggered, alerts are surfaced in:
 
-- 当前实时功率
-- 电压 / 电流等实时数据
-- 今日用电
-- 昨日 / 本月 / 本年对比
-- 24 小时曲线
-- 7 天曲线
-- 30 天曲线
-- 12 个月曲线
-- 设备状态
-- 当前断电 / 供电状态
+- The dashboard
+- The sidebar summary
+- The alert center
 
-同时还能直接执行：
+This allows the operator to react to issues without constantly watching card colors or raw power values.
 
-- 手动断电
-- 恢复供电
-- 修改名称
+### 10. Audit Logs
 
-所以房间详情页不是一个空页面，而是每个房间的完整档案页。
+The platform records operational events so investigations do not rely on guesswork.
 
-### 9. 带报警中心，不是出事了只能自己盯
+Logged actions include:
 
-系统支持按用电比例自动报警，目前内置的阈值逻辑包括：
+- Login
+- Device sync
+- Limit changes
+- Alert changes
+- Manual power cut-off
+- Automatic power cut-off
+- Power recovery
+- System setting updates
 
-- 80% 预警
-- 90% 预警
-- 95% 预警
+The log page supports filtering for common audit questions such as:
 
-报警触发后，系统会做这些事：
+- Who changed a room limit
+- Whether a cut-off was manual or automatic
+- Whether power was actually restored on a given day
 
-- 在仪表盘显示最新报警
-- 在侧边栏显示未处理报警数量
-- 在报警中心中记录详细内容
-- 支持后续处理 / 标记解决
+### 11. Business Time Zone Handling
 
-这意味着管理员不用一直自己盯着每张卡片看颜色变化，系统会主动把异常抛出来。
+Cloud-side Xiaomi data does not always align with the local business calendar, especially in overseas deployments.
 
-### 10. 带操作日志，后期排查有据可查
+The system therefore supports business time zone logic for:
 
-系统会记录关键操作，不是出了问题就只能猜。
+- Today’s totals
+- 24-hour trends
+- Day boundaries
+- Month boundaries
+- Daily reset timing
+- Automatic restore timing
 
-目前会记录的动作包括：
+This is especially important for European deployments where a China-default time model would be incorrect.
 
-- 登录
-- 设备同步
-- 修改限额
-- 修改报警
-- 手动断电
-- 自动断电
-- 恢复供电
-- 更新系统设置
+### 12. Mobile Browser Usability
 
-日志页支持按条件筛选，适合这些场景：
+The system is responsive and can be used directly from a mobile browser.
 
-- 排查是谁改了哪个房间的限额
-- 确认某次断电是手动还是自动触发
-- 看某天是否真的发生过恢复供电
+Mobile-usable capabilities include:
 
-### 11. 时区按业务场景走，不死绑国内时间
+- Dashboard browsing
+- Room-card viewing
+- Limit editing
+- Limit toggle switching
+- Chart browsing
+- Room detail access
+- Manual cut-off and restore
 
-因为米家云侧数据来源带有它自己的时间体系，如果直接照搬，海外场景容易出现错位。
+## Main Pages
 
-所以当前系统做了业务时区处理，默认按：
+### Dashboard
 
-- `Europe/Vienna`
+Used for:
 
-来计算这些内容：
+- Overall daily power and cost monitoring
+- Online/offline visibility
+- Latest alert visibility
+- Global quick actions
+- Per-room direct actions
 
-- 今日统计
-- 最近 24 小时曲线
-- 日切换
-- 月切换
-- 每日清零
-- 自动恢复供电
+### Charts
 
-这对于欧洲场景尤其重要，不然用户看到的“今天”和真实本地今天对不上。
+Used for:
 
-### 12. 手机端可以直接用
+- Trend analysis
+- Time-range comparisons
+- Room ranking
+- Cost movement analysis
 
-这个项目已经做了响应式适配，不是只能在桌面大屏上看。
+### Room Detail
 
-目前移动端可用的能力包括：
+Used for:
 
-- 仪表盘浏览
-- 房间卡片查看
-- 修改限额
-- 开关限额断电
-- 查看图表
-- 进入房间详情
-- 手动断电 / 恢复供电
+- Single-room real-time monitoring
+- Historical trend analysis
+- Manual cut-off / restore
+- Daily, monthly, and yearly comparisons
 
-也就是说，这个项目本质上是 Web 后台，但手机浏览器打开就能直接操作。
+### System Settings
 
-## 页面都有什么
+Used for:
 
-为了让第一次看到项目的人更容易理解，这里把页面直接拆开说。
+- Electricity pricing
+- Alert thresholds
+- Business time zone settings
+- Daily reset time
+- Xiaomi account login
+- Device synchronization
 
-### 仪表盘
+### Alert Center
 
-这是系统首页，主要负责“总览 + 快速操作”。
+Used for:
 
-你可以在这里做的事：
+- Reviewing unresolved alerts
+- Filtering by room
+- Filtering by time
+- Marking alerts as handled
 
-- 看整套系统今天的总用电和总费用
-- 看在线 / 离线状态
-- 看最新报警
-- 一键刷新数据
-- 一键开关全部设备电源
-- 一键开关全部限额断电
-- 直接操作单个房间
+### Operation Logs
 
-### 图表页
+Used for:
 
-这是用来观察趋势和排行的页面。
+- Reviewing important actions
+- Tracing cut-off and restore events
+- Confirming configuration changes
 
-你可以在这里做的事：
+## Best-Fit Use Cases
 
-- 看整体趋势
-- 看不同时间范围的统计
-- 看房间排行
-- 看费用走势
+This system is a strong fit for:
 
-### 房间详情页
+- Apartment electricity management
+- Shared-rental room-level limit enforcement
+- Dormitory power cut-off and restore workflows
+- Overseas deployments that still rely on Xiaomi / Mi Home devices
+- Teams that want monitoring and power control in the same backend
 
-这是单个房间的完整视图。
+If your use case is just one room with occasional Mi Home checks, this system is probably heavier than necessary. It is intended for multi-room, multi-device, long-running management scenarios.
 
-你可以在这里做的事：
-
-- 看该房间实时状态
-- 看历史图表
-- 做手动断电 / 恢复供电
-- 看今日、本月、本年对比
-
-### 系统设置页
-
-这是后台配置中心。
-
-你可以在这里做的事：
-
-- 设置电价
-- 设置报警阈值
-- 设置业务时区
-- 设置每日清零时间
-- 登录米家账号
-- 执行设备同步
-
-### 报警中心
-
-这是所有报警的集中处理页。
-
-你可以在这里做的事：
-
-- 查看未处理报警
-- 按房间筛选
-- 按时间筛选
-- 标记已处理
-
-### 操作日志
-
-这是所有关键操作的审计页。
-
-你可以在这里做的事：
-
-- 看最近谁做了什么
-- 查什么时候断过电
-- 查什么时候恢复供电
-- 查谁修改了设置和限额
-
-## 谁适合用这个系统
-
-这套系统适合的场景很明确：
-
-- 公寓房间用电统一管理
-- 分租房按房间限额控制
-- 宿舍按空间进行断电和恢复
-- 海外场景下接入中国区米家设备
-- 希望把“看数据”和“控制电源”放在同一个后台里
-
-如果你的场景是“只有一个房间、只偶尔看看米家 App”，那这个系统就偏重了。
-
-如果你的场景是“多个房间、多个设备、需要长期管控”，那它就是为这种情况做的。
-
-## 系统截图
+## Screenshot
 
 ![ZHIRAI dashboard overview](./docs/images/zhirai-dashboard-overview.png)
 
-## 技术栈
+## Tech Stack
 
-### 前端
+### Frontend
 
 - React
 - TypeScript
@@ -386,7 +324,7 @@ ZHIRAI Apartment Energy Manager 是一套给公寓、宿舍、出租房、多房
 - Zustand
 - ECharts
 
-### 后端
+### Backend
 
 - Node.js
 - Express
@@ -396,42 +334,42 @@ ZHIRAI Apartment Energy Manager 是一套给公寓、宿舍、出租房、多房
 - Socket.IO
 - node-cron
 
-### 部署方式
+### Deployment
 
 - Docker
 - Docker Compose
 
-## 项目目录
+## Project Structure
 
 ```text
-client/          Web 前端
-server/          API、米家接入、实时计算、定时任务、业务逻辑
-shared/          前后端共享类型
-deploy/remote/   远程部署配置
-docs/images/     README 展示图片
+client/          Web frontend
+server/          API, Xiaomi integration, real-time calculations, scheduled jobs, business logic
+shared/          Shared frontend/backend types
+deploy/remote/   Remote deployment configuration
+docs/images/     Images used in the README
 ```
 
-## 快速开始
+## Quick Start
 
-### 1. 安装依赖
+### 1. Install Dependencies
 
 ```bash
 npm install
 ```
 
-### 2. 配置环境变量
+### 2. Configure Environment Variables
 
-后端环境变量模板在：
+The backend environment template is located at:
 
 - `server/.env.example`
 
-你需要复制一份作为自己的本地配置：
+Create your local configuration from it:
 
 ```bash
 cp server/.env.example server/.env
 ```
 
-至少要配置这些内容：
+At minimum, configure:
 
 - `DATABASE_URL`
 - `REDIS_URL`
@@ -441,68 +379,68 @@ cp server/.env.example server/.env
 - `XIAOMI_USERNAME`
 - `XIAOMI_PASSWORD`
 
-注意两点：
+Notes:
 
-- 真实账号密码只放在你自己的 `.env` 或服务器环境变量里
-- 不要把真实凭据提交进仓库
+- Keep real credentials only in your local `.env` file or in server-side environment variables
+- Never commit real credentials to the repository
 
-### 3. 本地开发启动
+### 3. Start Local Development
 
 ```bash
 npm run dev
 ```
 
-默认端口：
+Default ports:
 
-- 前端：`http://localhost:3000`
-- 后端：`http://localhost:3001`
+- Frontend: `http://localhost:3000`
+- Backend: `http://localhost:3001`
 
-## Docker 部署
+## Docker Deployment
 
-如果你要容器化运行整套服务，可以直接：
+To run the full stack with containers:
 
 ```bash
 docker compose up -d
 ```
 
-推荐的生产部署思路是：
+Recommended production deployment model:
 
-- PostgreSQL 做持久化
-- Redis 做缓存和状态存储
-- 后端走容器部署
-- 前端构建后走静态托管或 Web 服务器托管
+- PostgreSQL for persistent storage
+- Redis for cache and runtime state
+- Backend in containers
+- Frontend served as static assets or through a web server
 
-## 业务逻辑说明
+## Business Logic Notes
 
-### 自动断电逻辑
+### Automatic Cut-Off
 
-- 每个房间可以单独设置日限额
-- 每个房间可以单独决定是否开启限额断电
-- 开启后，达到 100% 限额会自动断电
+- Each room can have its own daily limit
+- Each room can independently enable or disable limit-based cut-off
+- Once enabled, reaching `100%` of the limit triggers automatic power cut-off
 
-### 报警逻辑
+### Alerts
 
-- 80%、90%、95% 会逐级触发报警
-- 报警会显示在仪表盘、侧边栏和报警中心
+- Alerts escalate at `80%`, `90%`, and `95%`
+- They are displayed in the dashboard, sidebar, and alert center
 
-### 自动恢复逻辑
+### Automatic Restore
 
-- 系统按每日清零时间切换到新的一天
-- 自动断电的房间可在次日恢复供电
+- The system switches to a new business day based on the configured reset time
+- Rooms that were automatically cut off can be restored on the next day
 
-### 实时刷新逻辑
+### Real-Time Refresh
 
-- 仪表盘会持续刷新关键状态
-- 房间详情页也会同步最新数据
-- 报警和操作结果会及时反映到前端
+- The dashboard continuously refreshes critical state
+- Room detail pages also stay updated
+- Alerts and operation results are propagated back to the frontend quickly
 
-## 联系信息
+## Contact
 
-### 技术支持
+### Technical Support
 
 - [xtang3125@gmail.com](mailto:xtang3125@gmail.com)
 
-### 商务合作
+### Business Contact
 
 - [txq@zhinian-ai.com](mailto:txq@zhinian-ai.com)
 
@@ -510,17 +448,27 @@ docker compose up -d
 
 - `https://discord.gg/uQRzb53R`
 
-### QQ群
+### QQ Group
 
 - `147594586`
 
-### QQ群链接
+### QQ Group Link
 
 - `https://qm.qq.com/q/jGGRuz368w`
 
 ## License
 
-本项目采用 [`PolyForm Noncommercial 1.0.0`](./LICENSE)。
+This project is licensed under [`PolyForm Noncommercial 1.0.0`](./LICENSE).
 
-- 允许：个人学习、研究、测试、非商用修改
-- 禁止：商业使用、付费分发、直接用于商业产品或商业服务
+Allowed:
+
+- Personal study
+- Research
+- Testing
+- Non-commercial modification
+
+Not allowed:
+
+- Commercial use
+- Paid redistribution
+- Direct use in commercial products or services

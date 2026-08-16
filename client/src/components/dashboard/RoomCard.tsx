@@ -7,12 +7,9 @@ import { Badge } from '../ui/badge';
 import { Progress } from '../ui/progress';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
-import { PasswordInput } from '../ui/password-input';
 import { Label } from '../ui/label';
 import {
   Pencil,
-  Wifi,
-  Camera,
   Cpu,
   Power,
   Upload,
@@ -44,20 +41,29 @@ import {
   ShieldAlert,
   Monitor,
   ExternalLink,
-  CheckSquare,
-  Square,
 } from 'lucide-react';
 import {
   ROOM_STATUS_COLORS,
   ROOM_STATUS_TEXT,
-  RoomStatus,
   UserRole,
   DeviceCategory,
   DEVICE_CATEGORY_LABEL,
-  inferDeviceCategory,
 } from '../../types';
 import type { DeviceItem } from '../../types';
 import { cn } from '../../lib/utils';
+import {
+  formatCost,
+  formatEnergy,
+  formatPower,
+  countDeviceCategories,
+  pickPrimaryCategory,
+  getCategoryToneClass,
+  getCategoryIcon,
+  formatBytes,
+  hasMeaningfulValue,
+  progressColorForPercent,
+} from '../../lib/format';
+import { getRoomStatusCardToneClass } from '../../lib/status-maps';
 import { energy, system } from '../../lib/api';
 import {
   Dialog,
@@ -77,52 +83,12 @@ import {
 import { useAuthStore } from '../../store/auth';
 import { useXiaomiRememberedCredentials } from '../../hooks/useXiaomiRememberedCredentials';
 import { DashboardSpaceCard, floorToDualLabel } from './RoomsGrid';
-import { ValueWithUnit } from '../ui/value-with-unit';
 import { FeeHint } from '../ui/fee-hint';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../ui/tooltip';
 
 interface RoomCardProps {
   room: DashboardSpaceCard;
   pricePerKwh: number;
-}
-
-const powerFormatter = new Intl.NumberFormat('de-AT', {
-  minimumFractionDigits: 1,
-  maximumFractionDigits: 1,
-});
-
-const numberFormatter2 = new Intl.NumberFormat('de-AT', {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-function formatPower(value: number) {
-  return (
-    <ValueWithUnit
-      value={powerFormatter.format(value)}
-      unit="W"
-      valueClassName="font-semibold"
-    />
-  );
-}
-
-function formatEnergy(value: number) {
-  return (
-    <ValueWithUnit
-      value={numberFormatter2.format(value)}
-      unit="kWh"
-      valueClassName="font-semibold"
-    />
-  );
-}
-
-function formatCost(value: number) {
-  return new Intl.NumberFormat('de-AT', {
-    style: 'currency',
-    currency: 'EUR',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(value);
 }
 
 function getToggleButtonClass(checked: boolean, disabled?: boolean) {
@@ -133,67 +99,6 @@ function getToggleButtonClass(checked: boolean, disabled?: boolean) {
       : 'border-rose-500/55 bg-rose-600/24 text-rose-800 hover:bg-rose-600/30 dark:border-rose-500/45 dark:bg-rose-500/18 dark:text-rose-200 dark:hover:bg-rose-500/24',
     disabled && 'cursor-not-allowed opacity-60',
   );
-}
-
-function useMemoCategoryCounts(devices: DeviceItem[]): Record<DeviceCategory, number> {
-  const out: Record<string, number> = {
-    [DeviceCategory.CIRCUIT_BREAKER]: 0,
-    [DeviceCategory.CAMERA]: 0,
-    [DeviceCategory.WIFI_AP]: 0,
-    [DeviceCategory.FIVE_G_CPE]: 0,
-    [DeviceCategory.SMART_APPLIANCE]: 0,
-    [DeviceCategory.OTHER]: 0,
-  };
-  const seen = new Set<string>();
-  for (const d of devices) {
-    const key = d.id ?? d.did;
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    const cat = String((d as any).category ?? DeviceCategory.OTHER) as DeviceCategory;
-    out[cat] = (out[cat] ?? 0) + 1;
-  }
-  return out as Record<DeviceCategory, number>;
-}
-
-function pickPrimaryCategory(devices: DeviceItem[]): DeviceCategory {
-  if (!devices.length) return DeviceCategory.OTHER;
-  const counts = useMemoCategoryCounts(devices);
-  const order: DeviceCategory[] = [
-    DeviceCategory.CIRCUIT_BREAKER,
-    DeviceCategory.CAMERA,
-    DeviceCategory.FIVE_G_CPE,
-    DeviceCategory.WIFI_AP,
-    DeviceCategory.SMART_APPLIANCE,
-    DeviceCategory.OTHER,
-  ];
-  let best = DeviceCategory.OTHER;
-  let bestCount = -1;
-  for (const c of order) {
-    const n = counts[c] ?? 0;
-    if (n > bestCount) {
-      bestCount = n;
-      best = c;
-    }
-  }
-  return best;
-}
-
-function getCategoryToneClass(cat: DeviceCategory): string {
-  switch (cat) {
-    case DeviceCategory.CIRCUIT_BREAKER:
-      return 'border-emerald-400/50 bg-emerald-50 text-emerald-700 dark:border-emerald-700/60 dark:bg-emerald-950/40 dark:text-emerald-300';
-    case DeviceCategory.CAMERA:
-      return 'border-indigo-400/50 bg-indigo-50 text-indigo-700 dark:border-indigo-700/60 dark:bg-indigo-950/40 dark:text-indigo-300';
-    case DeviceCategory.FIVE_G_CPE:
-      return 'border-amber-400/60 bg-amber-50 text-amber-800 dark:border-amber-600/50 dark:bg-amber-950/40 dark:text-amber-300';
-    case DeviceCategory.WIFI_AP:
-      return 'border-sky-400/50 bg-sky-50 text-sky-700 dark:border-sky-700/60 dark:bg-sky-950/40 dark:text-sky-300';
-    case DeviceCategory.SMART_APPLIANCE:
-      return 'border-violet-400/50 bg-violet-50 text-violet-700 dark:border-violet-700/60 dark:bg-violet-950/40 dark:text-violet-300';
-    case DeviceCategory.OTHER:
-    default:
-      return 'border-slate-400/50 bg-slate-50 text-slate-700 dark:border-slate-700/60 dark:bg-slate-900/40 dark:text-slate-300';
-  }
 }
 
 export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
@@ -261,6 +166,7 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
   const [euCameraLoginExpanded, setEuCameraLoginExpanded] = useState(false);
   const { credentials: euCameraRemember, persist: persistEuCameraRemember, clear: clearEuCameraRemember } =
     useXiaomiRememberedCredentials('camera')
+  void clearEuCameraRemember;
   const [euCameraUsername, setEuCameraUsername] = useState(euCameraRemember.username);
   const [euCameraPassword, setEuCameraPassword] = useState(euCameraRemember.password);
   const [euCameraRegion, setEuCameraRegion] = useState<string>(euCameraRemember.region || 'de');
@@ -270,6 +176,7 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
     setEuCameraRegion(euCameraRemember.region || 'de');
   }, [euCameraRemember.username, euCameraRemember.password, euCameraRemember.region]);
   const [euCameraLoginLoading, setEuCameraLoginLoading] = useState(false);
+  void euCameraLoginLoading;
   const [euCameraLoginInfo, setEuCameraLoginInfo] = useState<{
     loggedIn: boolean;
     username?: string;
@@ -283,6 +190,7 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
   } | null>(null);
   const [euCameraVerificationCode, setEuCameraVerificationCode] = useState('');
   const [euCameraOtpLoading, setEuCameraOtpLoading] = useState<null | 'send' | 'verify'>(null);
+  void euCameraOtpLoading;
   const [otpResendCountdown, setOtpResendCountdown] = useState<number>(0);
   const [networkDetailOpen, setNetworkDetailOpen] = useState(false);
   const [adapterKind, setAdapterKind] = useState<'huawei_cpe' | 'nokia_beacon' | null>(null);
@@ -317,25 +225,6 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
     window.open(networkAdminUrl, '_blank', 'noopener,noreferrer');
   };
 
-  const formatBytesFn = (bytes: number | null | undefined): string => {
-    if (bytes == null || !Number.isFinite(bytes)) return '0 B';
-    const b = Number(bytes);
-    if (Math.abs(b) < 1024) return `${b.toFixed(0)} B`;
-    const k = b / 1024;
-    if (Math.abs(k) < 1024) return `${k.toFixed(1)} KB`;
-    const m = k / 1024;
-    if (Math.abs(m) < 1024) return `${m.toFixed(2)} MB`;
-    return `${(m / 1024).toFixed(2)} GB`;
-  };
-  const hasMeaningfulValue = (value: unknown): boolean => {
-    if (value == null) return false;
-    if (typeof value === 'number') return Number.isFinite(value) && value > 0;
-    if (typeof value === 'boolean') return true;
-    if (Array.isArray(value)) return value.length > 0;
-    const text = String(value).trim();
-    if (!text) return false;
-    return !['--', '-- Mbps', '-- 台', '-- dBm', '0 B'].includes(text);
-  };
   const openNetworkDevicePage = (panel: 'clients' | 'nodes' = 'clients', event?: { stopPropagation?: () => void }) => {
     event?.stopPropagation?.();
     if (!deviceDid) {
@@ -503,50 +392,12 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
         : `冷却中，还需 ${room.powerActionRetryAfterSeconds} 秒`;
 
   const devices: DeviceItem[] = (room.devices ?? []) as DeviceItem[];
-  const categoryCounts = useMemoCategoryCounts(devices);
+  const categoryCounts = countDeviceCategories(devices);
   const primaryCategory = pickPrimaryCategory(devices);
   const primaryCategoryLabel = DEVICE_CATEGORY_LABEL[primaryCategory] ?? '其他智能设备';
   const multiCategory = Object.values(categoryCounts).filter((n) => n > 0).length >= 2;
 
-  const renderCategoryIcon = (cat: DeviceCategory) => {
-    switch (cat) {
-      case DeviceCategory.WIFI_AP:
-        return <Wifi className="h-3.5 w-3.5" />;
-      case DeviceCategory.CAMERA:
-        return <Camera className="h-3.5 w-3.5" />;
-      case DeviceCategory.SMART_APPLIANCE:
-        return <Cpu className="h-3.5 w-3.5" />;
-      case DeviceCategory.CIRCUIT_BREAKER:
-        return <Power className="h-3.5 w-3.5" />;
-      case DeviceCategory.FIVE_G_CPE:
-        return <SignalHigh className="h-3.5 w-3.5" />;
-      default:
-        return <Cpu className="h-3.5 w-3.5" />;
-    }
-  };
-
-  const getCardToneClass = () => {
-    switch (room.status) {
-      case RoomStatus.WARNING_80:
-      case RoomStatus.WARNING_90:
-        return 'border-yellow-300 bg-yellow-50/90 hover:bg-yellow-100/90 dark:border-yellow-700 dark:bg-yellow-950/25 dark:hover:bg-yellow-950/35';
-      case RoomStatus.WARNING_95:
-      case RoomStatus.CUTOFF:
-        return 'border-red-300 bg-red-50/90 hover:bg-red-100/90 dark:border-red-800 dark:bg-red-950/25 dark:hover:bg-red-950/35';
-      case RoomStatus.OFFLINE:
-        return 'border-slate-300 bg-slate-50/90 hover:bg-slate-100/90 dark:border-slate-700 dark:bg-slate-950/25 dark:hover:bg-slate-950/35';
-      case RoomStatus.NORMAL:
-      default:
-        return 'border-emerald-200 bg-emerald-50/70 hover:bg-emerald-100/80 dark:border-emerald-900 dark:bg-emerald-950/15 dark:hover:bg-emerald-950/25';
-    }
-  };
-
-  const getProgressColor = () => {
-    if (percent >= 95) return 'bg-red-500';
-    if (percent >= 90) return 'bg-orange-500';
-    if (percent >= 80) return 'bg-yellow-500';
-    return 'bg-green-500';
-  };
+  const cardToneClassName = getRoomStatusCardToneClass(room.status);
 
   const handleOpenDetail = () => {
     if (editingName) return;
@@ -606,7 +457,7 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
     event.stopPropagation();
     const trimmed = (draftName ?? '').trim();
     if (!isPublicFacility && !trimmed) {
-      // 空名字视为恢复"未命名房间"
+      // Empty name restores the "unnamed room"
     }
     if (trimmed.length > 8) {
       toast.error('名称最多 8 个字');
@@ -1251,12 +1102,16 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
     }
   };
 
+  void handleEuCameraLogin;
+  void handleEuCameraSendCode;
+  void handleEuCameraVerifyCode;
+
   return (
     <>
     <Card
       className={cn(
         'h-full w-full min-w-0 border border-l-4 transition-all duration-200 hover:shadow-lg',
-        getCardToneClass(),
+        cardToneClassName,
         room.roomId ? 'cursor-pointer' : 'cursor-default'
       )}
       style={{ borderLeftColor: statusColor }}
@@ -1570,7 +1425,7 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
               const clientCount = Number(cpe?.clientCount ?? cpe?.connectedDevices);
               const fmtMbps = (v: number | null) => (v != null && Number.isFinite(v) && v > 0 ? `${v.toFixed(1)} Mbps` : '-- Mbps');
               const operatorLabel = String(cpe?.operatorShort ?? cpe?.operatorFullname ?? '').trim() || '--';
-              const monthTrafficLabel = formatBytesFn(
+              const monthTrafficLabel = formatBytes(
                 Number(cpe?.monthRxBytes ?? 0) + Number(cpe?.monthTxBytes ?? 0),
               );
               const summaryCards = [
@@ -1741,7 +1596,7 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
             </div>
             <Progress
               value={percent}
-              indicatorClassName={getProgressColor()}
+              indicatorClassName={progressColorForPercent(percent)}
               className="h-1.5"
             />
             <div className="mt-2 mb-1.5 flex flex-col gap-1 text-[clamp(0.72rem,1vw,0.78rem)] sm:flex-row sm:items-center sm:justify-between">
@@ -1768,7 +1623,7 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
             </div>
             <Progress
               value={costPercent}
-              indicatorClassName={getProgressColor()}
+              indicatorClassName={progressColorForPercent(costPercent)}
               className="h-1.5"
             />
           </div>
@@ -1834,7 +1689,7 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
                     className={cn('text-[10px] border', getCategoryToneClass(cat))}
                   >
                     <span className="mr-1 inline-flex items-center">
-                      {renderCategoryIcon(cat)}
+                      {(() => { const I = getCategoryIcon(cat); return <I className="h-3.5 w-3.5" />; })()}
                     </span>
                     {DEVICE_CATEGORY_LABEL[cat] ?? cat} {n}
                   </Badge>
@@ -1846,7 +1701,7 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
               className={cn('text-[10px] border', getCategoryToneClass(primaryCategory))}
             >
               <span className="mr-1 inline-flex items-center">
-                {renderCategoryIcon(primaryCategory)}
+                {(() => { const I = getCategoryIcon(primaryCategory); return <I className="h-3.5 w-3.5" />; })()}
               </span>
               {primaryCategoryLabel} {Object.values(categoryCounts).reduce((a, b) => a + b, 0) || '无'}
             </Badge>
@@ -2348,270 +2203,18 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
               </button>
               {euCameraLoginExpanded ? (
                 <div className="space-y-2.5 border-t px-3 py-3">
-                  <div className="space-y-1.5">
-                    <div className="space-y-1">
-                      <Label htmlFor={`eu-cam-user-${room.key}`} className="text-[11px]">EU 米家账号</Label>
-                      <Input
-                        id={`eu-cam-user-${room.key}`}
-                        className="h-8 text-xs"
-                        placeholder="账号邮箱"
-                        value={euCameraUsername}
-                        onChange={(e) => setEuCameraUsername(e.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label htmlFor={`eu-cam-pass-${room.key}`} className="text-[11px]">密码</Label>
-                      <PasswordInput
-                        id={`eu-cam-pass-${room.key}`}
-                        className="h-8 text-xs"
-                        placeholder="EU 区密码"
-                        value={euCameraPassword}
-                        onChange={(e) => setEuCameraPassword(e.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <div className="flex items-center justify-between pt-0.5">
-                        <div
-                          className="inline-flex items-center gap-1.5 select-none cursor-pointer"
-                          onClick={(e) => {
-                            e.preventDefault();
-                            persistEuCameraRemember({ enabled: !euCameraRemember.enabled })
-                          }}
-                        >
-                          {euCameraRemember.enabled ? (
-                            <CheckSquare className="h-3.5 w-3.5 text-primary shrink-0" aria-hidden />
-                          ) : (
-                            <Square className="h-3.5 w-3.5 text-slate-400 shrink-0" aria-hidden />
-                          )}
-                          <span className="text-[10.5px] text-slate-600 dark:text-slate-300">
-                            记住 EU 账号密码（下次打开自动填）
-                          </span>
-                        </div>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-6 px-1.5 text-[9.5px] text-slate-500 hover:text-rose-600"
-                          onClick={() => clearEuCameraRemember()}
-                          disabled={!euCameraRemember.username && !euCameraRemember.password}
-                        >
-                          清除
-                        </Button>
-                      </div>
-                    </div>
-                    <div className="space-y-1">
-                      <Label htmlFor={`eu-cam-region-${room.key}`} className="text-[11px]">地区</Label>
-                      <Select value={euCameraRegion} onValueChange={setEuCameraRegion}>
-                        <SelectTrigger id={`eu-cam-region-${room.key}`} className="h-8 text-xs">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="at">at 奥</SelectItem>
-                          <SelectItem value="de">de 德</SelectItem>
-                          <SelectItem value="fr">fr 法</SelectItem>
-                          <SelectItem value="ru">ru 俄</SelectItem>
-                          <SelectItem value="sg">sg 新</SelectItem>
-                          <SelectItem value="us">us 美</SelectItem>
-                          <SelectItem value="in">in 印</SelectItem>
-                        </SelectContent>
-                      </Select>
+                  <div className="rounded-md border border-indigo-200/70 bg-indigo-50/70 px-3 py-2 text-[11px] leading-5 text-indigo-800 dark:border-indigo-800/60 dark:bg-indigo-950/30 dark:text-indigo-200">
+                    欧区米家账号登录已经转移到「系统设置 {'>'} 设备同步 {'>'} 账号同步」统一管理。
+                    <div className="mt-1.5 text-[10.5px] text-indigo-700/90 dark:text-indigo-300/90">
+                      这里不再重复放账号、密码和验证码表单，登录后本摄像头会直接复用后台已建立的欧洲区会话。
                     </div>
                   </div>
-                  <div className="space-y-1 pt-1">
-                    <Label htmlFor={`eu-cam-otp-${room.key}`} className="text-[11px]">
-                      邮箱验证码
-                      {euCameraLoginInfo?.codeSentAt ? (
-                        otpResendCountdown > 0 ? (
-                          <span className="ml-1 text-[9.5px] text-amber-600 dark:text-amber-400">
-                            验证码已发送 · {otpResendCountdown}s 后可重发
-                          </span>
-                        ) : (
-                          <span className="ml-1 text-[9.5px] text-slate-400">
-                            邮件发送于 {(() => {
-                              try {
-                                const t = new Date(euCameraLoginInfo.codeSentAt as string);
-                                const mm = String(t.getMinutes()).padStart(2, '0');
-                                const ss = String(t.getSeconds()).padStart(2, '0');
-                                return `${t.getHours()}:${mm}:${ss}`;
-                              } catch {
-                                return '';
-                              }
-                            })()} · 再点登录可重发
-                          </span>
-                        )
-                      ) : null}
-                    </Label>
-                    <div className="flex items-center gap-2">
-                      <Input
-                        id={`eu-cam-otp-${room.key}`}
-                        className="h-8 flex-1 min-w-0 text-xs tracking-[0.25em] pl-3 pr-3 font-mono"
-                        inputMode="numeric"
-                        autoComplete="one-time-code"
-                        placeholder="6 位验证码"
-                        maxLength={6}
-                        value={euCameraVerificationCode}
-                        onChange={(e) =>
-                          setEuCameraVerificationCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))
-                        }
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            e.preventDefault();
-                            if (euCameraVerificationCode.length >= 4) handleEuCameraVerifyCode();
-                            else handleEuCameraLogin();
-                          }
-                        }}
-                      />
-                      <Button
-                        size="sm"
-                        variant="secondary"
-                        className="h-8 shrink-0 w-[72px] text-[10.5px] border border-amber-300/70 bg-amber-50 text-amber-700 hover:bg-amber-100 dark:bg-amber-950/30 dark:text-amber-300 dark:border-amber-800/60"
-                        onClick={handleEuCameraSendCode}
-                        disabled={euCameraOtpLoading === 'send' || euCameraLoginLoading}
-                      >
-                        {euCameraOtpLoading === 'send' ? <RefreshCw className="h-3 w-3 animate-spin" /> : '发码'}
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="default"
-                        className="h-8 shrink-0 w-[92px] text-[10.5px] bg-emerald-600 hover:bg-emerald-700"
-                        onClick={handleEuCameraVerifyCode}
-                        disabled={
-                          euCameraOtpLoading === 'verify' ||
-                          euCameraLoginLoading ||
-                          euCameraVerificationCode.length < 4
-                        }
-                      >
-                        {euCameraOtpLoading === 'verify' ? (
-                          <RefreshCw className="h-3 w-3 animate-spin" />
-                        ) : '提码'}
-                      </Button>
-                    </div>
+                  <div className="rounded-md border bg-muted/30 px-3 py-2 text-[10.5px] text-muted-foreground">
+                    当前会话状态：
+                    {euCameraLoginInfo?.loggedIn
+                      ? ` 已登录 ${euCameraLoginInfo.region ? `(${euCameraLoginInfo.region.toUpperCase()})` : ''}${euCameraLoginInfo.username ? ` · ${euCameraLoginInfo.username}` : ''}`
+                      : ' 未登录'}
                   </div>
-                  <div className="flex flex-wrap items-center gap-2 pt-1">
-                    <Button
-                      size="sm"
-                      className="h-8 bg-indigo-600 text-[11px] hover:bg-indigo-700"
-                      onClick={() => handleEuCameraLogin()}
-                      disabled={euCameraLoginLoading || !canControl || otpResendCountdown > 0}
-                    >
-                      {euCameraLoginLoading ? <RefreshCw className="mr-1 h-3 w-3 animate-spin" /> : null}
-                      {otpResendCountdown > 0 ? `登录（重发 ${otpResendCountdown}s）` : '登录'}
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-8 text-[11px] ml-auto"
-                      onClick={refreshEuCameraDevices}
-                      disabled={!canControl}
-                    >
-                      <RefreshCw className="mr-1 h-3 w-3" /> 刷新设备
-                    </Button>
-                  </div>
-                  {euCameraLoginInfo?.authMessage || euCameraLoginInfo?.needsVerification ? (
-                    <div
-                      className={`rounded-md border px-3 py-2 text-[11px] leading-5 ${
-                        euCameraLoginInfo?.needsVerification
-                          ? 'bg-amber-50 dark:bg-amber-950/30 border-amber-200/70 dark:border-amber-800/60 text-amber-700 dark:text-amber-300'
-                          : 'bg-rose-50 dark:bg-rose-950/30 border-rose-200/70 dark:border-rose-800/60 text-rose-700 dark:text-rose-300'
-                      }`}
-                    >
-                      {euCameraLoginInfo?.needsVerification ? (
-                        <span className="font-semibold">🔐 需要安全验证 · </span>
-                      ) : (
-                        <span className="font-semibold">⚠ </span>
-                      )}
-                      {euCameraLoginInfo?.authMessage || '已触发 EU 安全验证，点左边「发码」再填邮箱里的 6 位提交。'}
-                      {euCameraLoginInfo?.verificationMethod === 'browser' && euCameraLoginInfo?.notificationUrl ? (
-                        <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                          <a
-                            href={euCameraLoginInfo.notificationUrl}
-                            target="_blank"
-                            rel="noreferrer noopener"
-                            className="inline-flex items-center gap-1 rounded border border-indigo-300/70 bg-white/60 dark:bg-indigo-950/30 px-2 py-1 text-[10.5px] text-indigo-700 dark:text-indigo-300 hover:underline"
-                          >
-                            在浏览器中完成验证（点击打开）
-                            <ExternalLink className="h-3 w-3" />
-                          </a>
-                          <span className="text-[10.5px] text-slate-500 dark:text-slate-400">
-                            浏览器完成后回来点右上角「刷新设备」
-                          </span>
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : null}
-                  {euCameraLoginInfo?.devices?.length ? (
-                    (() => {
-                      const all: any[] = euCameraLoginInfo.devices ?? [];
-                      const cam = all.filter((d) => inferDeviceCategory({ name: d.name, model: d.model }) === DeviceCategory.CAMERA);
-                      const rest = all.filter((d) => inferDeviceCategory({ name: d.name, model: d.model }) !== DeviceCategory.CAMERA);
-                      return (
-                        <div className="rounded-md border bg-slate-50 dark:bg-slate-900/40 p-2 max-h-[220px] overflow-auto space-y-2.5">
-                          {cam.length ? (
-                            <div>
-                              <div className="text-[10px] font-semibold text-emerald-700 dark:text-emerald-300 mb-1.5 flex items-center gap-1.5">
-                                <CameraIcon className="h-3 w-3" /> 摄像头设备（共 {cam.length} 台）
-                              </div>
-                              <div className="space-y-1">
-                                {cam.map((d: any) => (
-                                  <div key={d.did} className="flex flex-wrap items-center gap-2 rounded border border-emerald-200/60 bg-emerald-50/50 dark:border-emerald-800/50 dark:bg-emerald-950/30 px-2 py-1.5 text-[11px]">
-                                    <span className="font-semibold text-slate-800 dark:text-slate-100 min-w-0 max-w-[40%] truncate">
-                                      {d.name}
-                                    </span>
-                                    <Badge variant="outline" className="text-[9px]">{d.model}</Badge>
-                                    {d.sourceRegion ? (
-                                      <span className="inline-flex items-center rounded-md bg-blue-50 px-1.5 py-0.5 text-[9px] font-medium text-blue-700 ring-1 ring-inset ring-blue-200 dark:bg-blue-950/60 dark:text-blue-300 dark:ring-blue-800/60">
-                                        EU-{d.sourceRegion.toUpperCase()}
-                                      </span>
-                                    ) : null}
-                                    {d.localIp ? <Badge variant="outline" className="text-[9px]">LAN {d.localIp}</Badge> : null}
-                                    <Badge variant={d.online ? 'success' : 'secondary'} className="ml-auto text-[9px]">
-                                      {d.online ? '在线' : '离线'}
-                                    </Badge>
-                                    <span className="text-[9px] text-slate-400 break-all">did {d.did}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          ) : (
-                            <div className="rounded border-dashed border border-amber-200/60 bg-amber-50/40 dark:border-amber-800/50 dark:bg-amber-950/20 px-2.5 py-2 text-[10.5px] text-amber-800 dark:text-amber-200">
-                              此 EU 账号下共 {all.length} 台设备，暂未识别到摄像头类型。下方列出所有设备供排查：
-                            </div>
-                          )}
-                          {rest.length ? (
-                            <div>
-                              <div className="text-[10px] font-medium text-slate-500 mb-1.5">
-                                其他米家设备（共 {rest.length} 台）
-                              </div>
-                              <div className="space-y-1">
-                                {rest.map((d: any) => (
-                                  <div key={d.did} className="flex flex-wrap items-center gap-2 rounded bg-white/60 dark:bg-slate-800/50 px-2 py-1.5 text-[11px]">
-                                    <span className="font-semibold text-slate-800 dark:text-slate-200 min-w-0 max-w-[40%] truncate">
-                                      {d.name}
-                                    </span>
-                                    <Badge variant="outline" className="text-[9px]">{d.model}</Badge>
-                                    {d.sourceRegion ? (
-                                      <span className="inline-flex items-center rounded-md bg-blue-50 px-1.5 py-0.5 text-[9px] font-medium text-blue-700 ring-1 ring-inset ring-blue-200 dark:bg-blue-950/60 dark:text-blue-300 dark:ring-blue-800/60">
-                                        EU-{d.sourceRegion.toUpperCase()}
-                                      </span>
-                                    ) : null}
-                                    {d.localIp ? <Badge variant="outline" className="text-[9px]">LAN {d.localIp}</Badge> : null}
-                                    <Badge variant={d.online ? 'success' : 'secondary'} className="ml-auto text-[9px]">
-                                      {d.online ? '在线' : '离线'}
-                                    </Badge>
-                                    <span className="text-[9px] text-slate-400 break-all">did {d.did}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          ) : null}
-                        </div>
-                      );
-                    })()
-                  ) : euCameraLoginInfo?.loggedIn ? (
-                    <div className="rounded-md border border-dashed bg-muted/30 px-3 py-2 text-[10px] text-muted-foreground">
-                      会话已建立，暂无设备
-                    </div>
-                  ) : null}
                 </div>
               ) : null}
             </div>
@@ -3183,9 +2786,9 @@ export function RoomCard({ room, pricePerKwh }: RoomCardProps) {
                     ['最高下行', hasMeaningfulValue(fmtMbps(peakDownload)) ? fmtMbps(peakDownload) : null, 'text-emerald-700 dark:text-emerald-300'],
                     ['最高上行', hasMeaningfulValue(fmtMbps(peakUpload)) ? fmtMbps(peakUpload) : null, 'text-sky-700 dark:text-sky-300'],
                     ['会话时长', cpe?.sessionTimeSeconds ? `${Math.floor(Number(cpe.sessionTimeSeconds)/3600)}h ${Math.floor((Number(cpe.sessionTimeSeconds)%3600)/60)}m` : null, ''],
-                    ['总流量', (cpe?.totalRxBytes != null || cpe?.totalTxBytes != null) ? `↓${formatBytesFn(cpe?.totalRxBytes)} ↑${formatBytesFn(cpe?.totalTxBytes)}` : null, ''],
-                    ['本月', (cpe?.monthRxBytes != null || cpe?.monthTxBytes != null) ? `↓${formatBytesFn(cpe?.monthRxBytes)} ↑${formatBytesFn(cpe?.monthTxBytes)}` : null, ''],
-                    ['今日', (cpe?.dayRxBytes != null || cpe?.dayTxBytes != null) ? `↓${formatBytesFn(cpe?.dayRxBytes)} ↑${formatBytesFn(cpe?.dayTxBytes)}` : null, ''],
+                    ['总流量', (cpe?.totalRxBytes != null || cpe?.totalTxBytes != null) ? `↓${formatBytes(cpe?.totalRxBytes)} ↑${formatBytes(cpe?.totalTxBytes)}` : null, ''],
+                    ['本月', (cpe?.monthRxBytes != null || cpe?.monthTxBytes != null) ? `↓${formatBytes(cpe?.monthRxBytes)} ↑${formatBytes(cpe?.monthTxBytes)}` : null, ''],
+                    ['今日', (cpe?.dayRxBytes != null || cpe?.dayTxBytes != null) ? `↓${formatBytes(cpe?.dayRxBytes)} ↑${formatBytes(cpe?.dayTxBytes)}` : null, ''],
                     ['挂载设备', totalClients != null && totalClients > 0 ? `${totalClients}` : null, ''],
                     ['SIM 状态', typeof cpe?.simReady === 'boolean' ? (cpe.simReady ? '就绪' : '未就绪') : null, ''],
                     ['固件', cpe?.firmwareVersion ?? null, ''],

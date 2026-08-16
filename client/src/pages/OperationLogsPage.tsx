@@ -21,10 +21,11 @@ import {
   TableCell,
 } from '../components/ui/table'
 import { logs, system } from '../lib/api'
+import { formatDateTime as formatDateTimeShared } from '../lib/format'
 import { OperationType, ROOM_NUMBERS, type OperationLogResponse } from '../types'
 import { useSiteStore } from '../store/site'
 
-const OPERATION_TYPE_OPTIONS = [
+const OPERATION_TYPE_OPTIONS: { value: string; label: string }[] = [
   { value: 'all', label: '全部类型' },
   { value: OperationType.LOGIN, label: '登录' },
   { value: OperationType.LOGOUT, label: '登出' },
@@ -37,7 +38,7 @@ const OPERATION_TYPE_OPTIONS = [
   { value: OperationType.CONTROL_DEVICE, label: '控制设备' },
 ]
 
-const OPERATION_CATEGORY_OPTIONS = [
+const OPERATION_CATEGORY_OPTIONS: { value: string; label: string }[] = [
   { value: 'all', label: '全部分类' },
   { value: 'auth', label: '账号登录' },
   { value: 'room_power', label: '房间电力' },
@@ -50,7 +51,19 @@ const OPERATION_CATEGORY_OPTIONS = [
   { value: 'other', label: '其他' },
 ]
 
-const getOperationTypeBadge = (type: OperationType): string => {
+const OPERATION_TYPE_LABEL: Record<OperationType, string> = {
+  [OperationType.LOGIN]: '登录',
+  [OperationType.LOGOUT]: '登出',
+  [OperationType.UPDATE_LIMIT]: '修改限电',
+  [OperationType.CUTOFF_POWER]: '断电',
+  [OperationType.RESTORE_POWER]: '恢复供电',
+  [OperationType.SYNC_DEVICES]: '同步设备',
+  [OperationType.UPDATE_SETTINGS]: '修改设置',
+  [OperationType.UPDATE_ALARM]: '更新报警',
+  [OperationType.CONTROL_DEVICE]: '控制设备',
+} as const
+
+function getOperationTypeBadge(type: OperationType): string {
   switch (type) {
     case OperationType.LOGIN:
     case OperationType.LOGOUT:
@@ -69,64 +82,26 @@ const getOperationTypeBadge = (type: OperationType): string => {
   }
 }
 
-const getOperationTypeLabel = (type: OperationType): string => {
-  switch (type) {
-    case OperationType.LOGIN:
-      return '登录'
-    case OperationType.LOGOUT:
-      return '登出'
-    case OperationType.UPDATE_LIMIT:
-      return '修改限电'
-    case OperationType.CUTOFF_POWER:
-      return '断电'
-    case OperationType.RESTORE_POWER:
-      return '恢复供电'
-    case OperationType.SYNC_DEVICES:
-      return '同步设备'
-    case OperationType.UPDATE_SETTINGS:
-      return '修改设置'
-    case OperationType.UPDATE_ALARM:
-      return '更新报警'
-    case OperationType.CONTROL_DEVICE:
-      return '控制设备'
-    default:
-      return type
-  }
-}
-
-const getResultBadgeVariant = (
+function getResultBadgeVariant(
   tone?: 'success' | 'failure' | 'warning',
-): 'secondary' | 'destructive' | 'warning' => {
-  switch (tone) {
-    case 'warning':
-      return 'warning'
-    case 'failure':
-      return 'destructive'
-    case 'success':
-    default:
-      return 'secondary'
-  }
+): 'secondary' | 'destructive' | 'warning' {
+  if (tone === 'warning') return 'warning'
+  if (tone === 'failure') return 'destructive'
+  return 'secondary'
 }
 
-const formatDateTime = (dateStr: string): string => {
-  try {
-    return new Intl.DateTimeFormat('zh-CN', {
-      dateStyle: 'medium',
-      timeStyle: 'medium',
-    }).format(new Date(dateStr))
-  } catch {
-    return dateStr
-  }
+function formatDateTime(dateStr: string): string {
+  return formatDateTimeShared(dateStr);
 }
 
-type ParsedOperationDetails = Record<string, unknown>
+type ParsedDetails = Record<string, unknown>
 
-const parseOperationDetails = (raw: string | null | undefined): ParsedOperationDetails | null => {
+function parseDetails(raw: string | null | undefined): ParsedDetails | null {
   if (!raw) return null
   try {
     const parsed = JSON.parse(raw)
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return parsed as ParsedOperationDetails
+      return parsed as ParsedDetails
     }
   } catch {
     return null
@@ -134,35 +109,22 @@ const parseOperationDetails = (raw: string | null | undefined): ParsedOperationD
   return null
 }
 
-const asText = (value: unknown): string | null => {
+function textOf(value: unknown): string | null {
   if (typeof value !== 'string') return null
   const text = value.trim()
-  return text ? text : null
+  return text || null
 }
 
-const asNumber = (value: unknown): number | null => {
+function numberOrNull(value: unknown): number | null {
   const num = Number(value)
   return Number.isFinite(num) ? num : null
 }
 
-const asBool = (value: unknown): boolean | null => {
-  if (typeof value === 'boolean') return value
-  return null
+function boolOrNull(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null
 }
 
-const formatLimitValue = (value: unknown): string | null => {
-  const num = asNumber(value)
-  if (num == null) return null
-  return `${num} kWh/天`
-}
-
-const formatCostLimitValue = (value: unknown): string | null => {
-  const num = asNumber(value)
-  if (num == null) return null
-  return `EUR ${num}/月`
-}
-
-const cleanSummaryText = (value: string | null): string | null => {
+function cleanSummary(value: string | null): string | null {
   if (!value) return null
   return value
     .replace(/^说明[:：]\s*/u, '')
@@ -171,26 +133,51 @@ const cleanSummaryText = (value: string | null): string | null => {
     .trim() || null
 }
 
-const formatPercentValue = (value: number): string =>
-  Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/u, '')
-
-const extractLimitPercent = (value: string | null): string | null => {
-  if (!value) return null
-  const match = value.match(/(\d+(?:\.\d+)?)\s*%\s*限额/u)
-  if (!match) return null
-  const percent = Number(match[1])
-  if (!Number.isFinite(percent)) return null
-  return `${formatPercentValue(percent)}%`
+const ACTION_SHORTCUTS: Readonly<Record<string, (note: string | null, error: string | null, resultLabel?: string | null) => string | null>> = {
+  auto_cutoff: (note, error) => note || error || '超出日限额，执行自动断电',
+  manual_cutoff: (_note, error) => error || '手动执行断电',
+  auto_restore: (_note, error) => error || '进入恢复时段，执行自动恢复供电',
+  manual_restore: (_note, error) => error || '手动恢复供电',
+  auto_cutoff_skipped: (note, error, resultLabel) => note || error || (resultLabel ? `已${resultLabel}` : '本次未执行'),
+  auto_restore_skipped: (note, error, resultLabel) => note || error || (resultLabel ? `已${resultLabel}` : '本次未执行'),
 }
 
-const buildAlarmReasonSummary = (
+function buildLimitUpdateSummary(parsed: ParsedDetails | null): string | null {
+  if (!parsed) return null
+  const dailyLimit = numberOrNull(parsed.dailyLimit)
+  const limitEnabled = boolOrNull(parsed.limitEnabled)
+  const monthlyCostLimit = numberOrNull(parsed.monthlyCostLimit)
+  const costLimitEnabled = boolOrNull(parsed.costLimitEnabled)
+  const totalCount = numberOrNull(parsed.totalCount)
+  const action = textOf(parsed.action)?.toLowerCase()
+
+  if (action === 'bulk_update_limit' && dailyLimit != null) {
+    return totalCount != null
+      ? `批量将 ${totalCount} 个房间的日限额改为 ${dailyLimit} kWh/天`
+      : `批量将日限额改为 ${dailyLimit} kWh/天`
+  }
+  if (action === 'bulk_limit_enabled' && limitEnabled != null) {
+    const verb = limitEnabled ? '开启' : '关闭'
+    return totalCount != null ? `批量为 ${totalCount} 个房间${verb}限额断电` : `批量${verb}限额断电`
+  }
+  if (action !== 'update_limit') return null
+
+  const parts: string[] = []
+  if (dailyLimit != null) parts.push(`日限额改为 ${dailyLimit} kWh/天`)
+  if (monthlyCostLimit != null) parts.push(`费用限额改为 EUR ${monthlyCostLimit}/月`)
+  if (limitEnabled != null) parts.push(`限额断电已${limitEnabled ? '开启' : '关闭'}`)
+  if (costLimitEnabled != null) parts.push(`费用断电已${costLimitEnabled ? '开启' : '关闭'}`)
+  return parts.length ? parts.join('，') : null
+}
+
+function buildAlarmSummary(
   action: string | null | undefined,
   note: string | null,
   error: string | null,
   message: string | null,
   detailsText: string | null,
   deletedCount: number | null,
-): string | null => {
+): string | null {
   if (action === 'clear' && deletedCount != null) {
     return `已清除 ${deletedCount} 条报警记录`
   }
@@ -203,101 +190,63 @@ const buildAlarmReasonSummary = (
   }
 
   const alarmText = [note, error, message, detailsText].filter(Boolean).join(' ')
-  const limitPercent = extractLimitPercent(alarmText)
+  const match = alarmText.match(/(\d+(?:\.\d+)?)\s*%\s*限额/u)
+  const limitPercent = match ? (() => {
+    const n = Number(match[1])
+    if (!Number.isFinite(n)) return null
+    const formatted = Number.isInteger(n) ? String(n) : n.toFixed(1).replace(/\.0$/u, '')
+    return `${formatted}%`
+  })() : null
   const isRead = /已标记已读/u.test(alarmText)
 
-  if (limitPercent) {
-    return `电量限额超出 ${limitPercent}，已${isRead ? '标记已读' : '处理'}`
-  }
-  if (/超出日限额/u.test(alarmText)) {
-    return `电量超出日限额，已${isRead ? '标记已读' : '处理'}`
-  }
-  if (/网络或供电异常|离线/u.test(alarmText)) {
-    return `网络或供电异常，已${isRead ? '标记已读' : '处理'}`
-  }
-  if (deletedCount != null) {
-    return `已清除 ${deletedCount} 条报警记录`
-  }
+  if (limitPercent) return `电量限额超出 ${limitPercent}，已${isRead ? '标记已读' : '处理'}`
+  if (/超出日限额/u.test(alarmText)) return `电量超出日限额，已${isRead ? '标记已读' : '处理'}`
+  if (/网络或供电异常|离线/u.test(alarmText)) return `网络或供电异常，已${isRead ? '标记已读' : '处理'}`
+  if (deletedCount != null) return `已清除 ${deletedCount} 条报警记录`
 
   return note || error || message
 }
 
-const getOperationDetailSummary = (item: OperationLogResponse): string => {
-  const parsed = parseOperationDetails(item.details)
-  const action = asText(parsed?.action)?.toLowerCase()
-  const note = cleanSummaryText(asText(parsed?.note) ?? asText(parsed?.actionResult))
-  const error = cleanSummaryText(asText(parsed?.error) ?? asText(parsed?.reason))
-  const message = cleanSummaryText(asText(parsed?.message))
-  const detailsText = cleanSummaryText(String(item.detailsText ?? '').replace(/\s+/gu, ' ').trim() || null)
-  const dailyLimit = formatLimitValue(parsed?.dailyLimit)
-  const limitEnabled = asBool(parsed?.limitEnabled)
-  const monthlyCostLimit = formatCostLimitValue(parsed?.monthlyCostLimit)
-  const costLimitEnabled = asBool(parsed?.costLimitEnabled)
-  const deletedCount = asNumber(parsed?.deletedCount)
-  const totalCount = asNumber(parsed?.totalCount)
-  const failedCount = asNumber(parsed?.failedCount)
-  const skippedCount = asNumber(parsed?.skippedCount)
+function buildSyncSummary(parsed: ParsedDetails | null, item: OperationLogResponse): string | null {
+  const totalCount = numberOrNull(parsed?.totalCount)
+  const failedCount = numberOrNull(parsed?.failedCount)
+  const skippedCount = numberOrNull(parsed?.skippedCount)
+  const error = cleanSummary(textOf(parsed?.error) ?? textOf(parsed?.reason))
+  if (error) return error
+  if (failedCount || skippedCount) return `同步完成，失败 ${failedCount ?? 0}，跳过 ${skippedCount ?? 0}`
+  if (totalCount != null) return `已同步 ${totalCount} 个设备`
+  void item
+  return null
+}
 
-  if (action === 'auto_cutoff') {
-    return note || error || '超出日限额，执行自动断电'
+function getOperationDetailSummary(item: OperationLogResponse): string {
+  const parsed = parseDetails(item.details)
+  const action = textOf(parsed?.action)?.toLowerCase()
+  const note = cleanSummary(textOf(parsed?.note) ?? textOf(parsed?.actionResult))
+  const error = cleanSummary(textOf(parsed?.error) ?? textOf(parsed?.reason))
+  const message = cleanSummary(textOf(parsed?.message))
+  const detailsText = cleanSummary(String(item.detailsText ?? '').replace(/\s+/gu, ' ').trim() || null)
+  const deletedCount = numberOrNull(parsed?.deletedCount)
+
+  if (action && ACTION_SHORTCUTS[action]) {
+    const quick = ACTION_SHORTCUTS[action](note, error, item.resultLabel)
+    if (quick) return quick
   }
-  if (action === 'manual_cutoff') {
-    return error || '手动执行断电'
-  }
-  if (action === 'auto_restore') {
-    return error || '进入恢复时段，执行自动恢复供电'
-  }
-  if (action === 'manual_restore') {
-    return error || '手动恢复供电'
-  }
-  if (action === 'auto_cutoff_skipped' || action === 'auto_restore_skipped') {
-    return note || error || (item.resultLabel ? `已${item.resultLabel}` : '本次未执行')
-  }
-  if (action === 'update_limit') {
-    if (dailyLimit && limitEnabled != null) {
-      if (monthlyCostLimit && costLimitEnabled != null) {
-        return `日限额改为 ${dailyLimit}，费用限额改为 ${monthlyCostLimit}，限额断电已${limitEnabled ? '开启' : '关闭'}，费用断电已${costLimitEnabled ? '开启' : '关闭'}`
-      }
-      return `日限额改为 ${dailyLimit}，限额断电已${limitEnabled ? '开启' : '关闭'}`
-    }
-    if (monthlyCostLimit && costLimitEnabled != null) {
-      return `费用限额改为 ${monthlyCostLimit}，费用断电已${costLimitEnabled ? '开启' : '关闭'}`
-    }
-    if (dailyLimit) return `日限额改为 ${dailyLimit}`
-    if (monthlyCostLimit) return `费用限额改为 ${monthlyCostLimit}`
-    if (limitEnabled != null) return `限额断电已${limitEnabled ? '开启' : '关闭'}`
-    if (costLimitEnabled != null) return `费用断电已${costLimitEnabled ? '开启' : '关闭'}`
-  }
-  if (action === 'bulk_update_limit' && dailyLimit) {
-    return totalCount != null
-      ? `批量将 ${totalCount} 个房间的日限额改为 ${dailyLimit}`
-      : `批量将日限额改为 ${dailyLimit}`
-  }
-  if (action === 'bulk_limit_enabled' && limitEnabled != null) {
-    return totalCount != null
-      ? `批量为 ${totalCount} 个房间${limitEnabled ? '开启' : '关闭'}限额断电`
-      : `批量${limitEnabled ? '开启' : '关闭'}限额断电`
-  }
+
+  const limitSummary = buildLimitUpdateSummary(parsed)
+  if (limitSummary) return limitSummary
+
   if (action === 'resolve_alarm' || item.type === OperationType.UPDATE_ALARM) {
-    const alarmSummary = buildAlarmReasonSummary(
-      action,
-      note,
-      error,
-      message,
-      detailsText,
-      deletedCount,
-    )
+    const alarmSummary = buildAlarmSummary(action, note, error, message, detailsText, deletedCount)
     if (alarmSummary) return alarmSummary
   }
+
   if (item.type === OperationType.LOGIN || item.type === OperationType.LOGOUT) {
     return note || error || (item.success ? '登录状态已更新' : '登录失败')
   }
   if (item.type === OperationType.SYNC_DEVICES) {
-    if (error) return error
-    if (failedCount || skippedCount) {
-      return `同步完成，失败 ${failedCount ?? 0}，跳过 ${skippedCount ?? 0}`
-    }
-    if (totalCount != null) return `已同步 ${totalCount} 个设备`
+    const syncSummary = buildSyncSummary(parsed, item)
+    if (syncSummary) return syncSummary
   }
   if (item.type === OperationType.UPDATE_SETTINGS) {
     if (note) return note
@@ -319,15 +268,15 @@ const getOperationDetailSummary = (item: OperationLogResponse): string => {
         line.startsWith(prefix),
       ),
   )
-  const firstUseful = cleanSummaryText(usefulLines[0] ?? null)
+  const firstUseful = cleanSummary(usefulLines[0] ?? null)
   if (firstUseful) return firstUseful
 
   return item.success ? '已执行该操作' : '执行失败'
 }
 
-const getOperationRoomLabel = (item: OperationLogResponse): string => {
-  const displayName = asText(item.displayName)
-  const roomNumber = asText(item.roomNumber)
+function getOperationRoomLabel(item: OperationLogResponse): string {
+  const displayName = textOf(item.displayName)
+  const roomNumber = textOf(item.roomNumber)
 
   if (displayName && roomNumber) {
     if (displayName === roomNumber) return roomNumber
@@ -605,7 +554,7 @@ export function OperationLogsPage() {
                               | 'outline'
                           }
                         >
-                          {getOperationTypeLabel(item.type)}
+                          {OPERATION_TYPE_LABEL[item.type] ?? item.type}
                         </Badge>
                       </TableCell>
                       <TableCell

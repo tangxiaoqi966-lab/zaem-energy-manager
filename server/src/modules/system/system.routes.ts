@@ -9,6 +9,7 @@ import {
   updateSettings,
   refreshReferencePrice,
   xiaomiStatus,
+  xiaomiDevices,
   xiaomiLogin,
   xiaomiSync,
   controlDevice,
@@ -44,21 +45,23 @@ router.post('/lan-scan', authenticate, requireRole(UserRole.admin, UserRole.boss
 router.post('/lan-device/persist', authenticate, requireRole(UserRole.admin, UserRole.boss), persistLanDevices);
 router.get('/device/:did/snapshot', authenticate, getDeviceSnapshot);
 router.put('/device/:did/camera', authenticate, requireRole(UserRole.admin, UserRole.boss), updateDeviceCamera);
-// ─── 本地设备适配器：5G CPE / Nokia Mesh Beacon ───
+// ─── Local device adapter: 5G CPE / Nokia Mesh Beacon ───
 router.get('/device/:did/adapter_config', authenticate, getDeviceAdapterConfig);
 router.put('/device/:did/adapter_config', authenticate, requireRole(UserRole.admin, UserRole.boss), saveDeviceAdapterConfig);
 router.get('/device/:did/refresh_runtime', authenticate, requireRole(UserRole.admin, UserRole.boss), refreshDeviceRuntime);
 router.get('/xiaomi/status', authenticate, xiaomiStatus);
+router.get('/xiaomi/devices', authenticate, xiaomiDevices);
 router.post('/xiaomi/login', authenticate, requireRole(UserRole.admin), xiaomiLogin);
 router.post('/xiaomi/login/continue', authenticate, requireRole(UserRole.admin), xiaomiLogin);
 router.post('/xiaomi/sync', authenticate, requireRole(UserRole.admin), xiaomiSync);
-// ─── MiOT 双会话：摄像头区（欧洲区独立账号） ───
+// ─── MiOT dual session: camera region (independent EU account) ───
 router.get('/xiaomi/camera/status', authenticate, requireRole(UserRole.admin), xiaomiCameraStatus);
 router.post('/xiaomi/camera/login', authenticate, requireRole(UserRole.admin), xiaomiCameraLogin);
+router.post('/xiaomi/camera/login/continue', authenticate, requireRole(UserRole.admin), xiaomiCameraLogin);
 router.post('/xiaomi/camera/send_email_code', authenticate, requireRole(UserRole.admin), xiaomiCameraSendEmailCode);
 router.post('/xiaomi/camera/verify_email_code', authenticate, requireRole(UserRole.admin), xiaomiCameraVerifyEmailCode);
 router.get('/xiaomi/camera/devices', authenticate, xiaomiCameraDevices);
-// ─── MiOT 摄像头视频流 + 云台控制 ───
+// ─── MiOT camera video stream + PTZ control ───
 router.get('/device/:did/camera_stream', authenticate, getCameraStream);
 router.post('/device/:did/camera_ptz', authenticate, requireRole(UserRole.admin, UserRole.boss), controlCameraPTZ);
 router.post('/devices/control-all', authenticate, requireRole(UserRole.admin, UserRole.boss), bulkControlDevices);

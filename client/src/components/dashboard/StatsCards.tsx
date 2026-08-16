@@ -6,6 +6,7 @@ import type { DashboardSummary } from '../../types';
 import { cn } from '../../lib/utils';
 import { ValueWithUnit } from '../ui/value-with-unit';
 import { FeeHint } from '../../components/ui/fee-hint';
+import { formatCost, formatEnergy as formatEnergyShared, formatBytes as formatBytesShared } from '../../lib/format';
 
 interface StatsCardsProps {
   summary: DashboardSummary;
@@ -26,45 +27,22 @@ interface StatItem {
   };
 }
 
-const numberFormatter2 = new Intl.NumberFormat('de-AT', {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-const currencyFormatter = new Intl.NumberFormat('de-AT', {
-  style: 'currency',
-  currency: 'EUR',
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
 function formatEnergy(value: number) {
-  return (
-    <ValueWithUnit
-      value={numberFormatter2.format(value)}
-      unit="kWh"
-      valueClassName="font-bold"
-    />
-  );
-}
-
-function formatCost(value: number) {
-  return currencyFormatter.format(value);
+  return formatEnergyShared(value, 2, { valueClassName: 'font-bold' });
 }
 
 function formatBytes(value: number) {
-  if (!Number.isFinite(value) || value <= 0) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let u = 0;
-  let v = value;
-  while (v >= 1024 && u < units.length - 1) {
-    v /= 1024;
-    u++;
+  const rawStr = formatBytesShared(value);
+  const match = rawStr.match(/^([\d.,]+)\s*(B|KB|MB|GB|TB)$/);
+  if (!match) {
+    return (
+      <ValueWithUnit value="0" unit="B" valueClassName="font-bold" />
+    );
   }
   return (
     <ValueWithUnit
-      value={u === 0 ? `${Math.round(v)}` : v.toFixed(2)}
-      unit={units[u]}
+      value={match[1]}
+      unit={match[2]}
       valueClassName="font-bold"
     />
   );

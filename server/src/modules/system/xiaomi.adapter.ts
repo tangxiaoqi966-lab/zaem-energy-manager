@@ -15,143 +15,61 @@ import {
 } from '../../lib/business-time';
 import { OperationActorContext } from '../../lib/operation-log';
 import { formatRoomDisplayName } from '../../lib/room-display';
-
-interface XiaomiSession {
-  userId: string;
-  serviceToken: string;
-  ssecurity: string;
-  nonce?: number;
-  username: string;
-  loggedAt: string;
-  region?: string;
-}
-
-interface RawDevice {
-  did: string;
-  name?: string;
-  model?: string;
-  isOnline?: boolean;
-  show_mode?: number;
-  localip?: string;
-  token?: string;
-  status?: number;
-  room_id?: number | string;
-  bssid?: string;
-  parent_id?: string;
-}
-
-interface MiotPropQueryItem {
-  did: string;
-  siid: number;
-  piid: number;
-}
-
-interface DevicePropSnapshot {
-  power?: boolean;
-  powerW?: number;
-  currentA?: number;
-  voltageV?: number;
-  totalKwh?: number;
-}
-
-interface PowerConfirmationOptions {
-  initialDelayMs?: number;
-  retryDelayMs?: number;
-  maxAttempts?: number;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-export interface XiaomiAuthStatus {
-  state: 'idle' | 'logged_in' | 'challenge_required' | 'error';
-  needsVerification: boolean;
-  verificationMethod?: 'browser' | 'email_code' | 'mobile_code' | null;
-  message?: string;
-  notificationUrl?: string;
-  securityStatus?: number | null;
-  pwd?: number | null;
-  code?: number | string | null;
-  location?: string | null;
-  codeSentAt?: string | null;
-  username?: string;
-  lastAttemptAt?: string | null;
-  region?: string | null;
-  notificationId?: string | null;
-  emailMask?: string | null;
-  emailBound?: boolean | null;
-  sendFailed?: boolean | null;
-  rawSendBody?: any;
-  rawIdentityListBody?: any;
-  notificationList?: Array<any>;
-}
-
-export interface XiaomiCookieLoginInput {
-  username?: string;
-  userId: string;
-  serviceToken: string;
-  ssecurity: string;
-  region?: string;
-}
-
-interface XiaomiPendingLoginContext {
-  username: string;
-  cookieHeader: string;
-  formData: Record<string, any>;
-  notificationUrl?: string;
-  context?: string;
-  verificationMethod?: 'browser' | 'email_code' | null;
-  codeSentAt?: string | null;
-  lastAttemptAt: string;
-  region?: string;
-}
-
-type XiaomiSessionScope = 'main' | 'camera';
-
-const SESSION_KEY_MAIN = 'xiaomi:session';
-const SESSION_KEY_CAMERA = 'xiaomi:session:camera';
-const AUTH_STATUS_KEY = 'xiaomi:auth-status';
-const AUTH_STATUS_KEY_CAMERA = 'xiaomi:auth-status:camera';
-const PENDING_LOGIN_KEY = 'xiaomi:pending-login';
-const PENDING_LOGIN_KEY_CAMERA = 'xiaomi:pending-login:camera';
-const SESSION_TTL = 7 * 24 * 60 * 60;
-const REQUEST_TIMEOUT = 10000;
-const REGION_DEFAULT = 'cn';
-
-function sessionKeyFor(scope: XiaomiSessionScope): string {
-  return scope === 'camera' ? SESSION_KEY_CAMERA : SESSION_KEY_MAIN;
-}
-
-function authStatusKeyFor(scope: XiaomiSessionScope): string {
-  return scope === 'camera' ? AUTH_STATUS_KEY_CAMERA : AUTH_STATUS_KEY;
-}
-
-function pendingLoginKeyFor(scope: XiaomiSessionScope): string {
-  return scope === 'camera' ? PENDING_LOGIN_KEY_CAMERA : PENDING_LOGIN_KEY;
-}
+import {
+  readSessionFromRedis,
+  writeSessionToRedis,
+  clearSessionInRedis,
+  readPendingLoginFromRedis,
+  writePendingLoginToRedis,
+  clearPendingLoginInRedis,
+  readAuthStatusFromRedis,
+  writeAuthStatusToRedis,
+  getEnvCredentials as getEnvCredentialsFromAuthLib,
+  getCameraEnvCredentials,
+  buildApiBaseUrl as buildApiBaseUrlFromLib,
+  getDeviceListUrl,
+  sessionKeyFor,
+  authStatusKeyFor,
+  pendingLoginKeyFor,
+  REGION_DEFAULT,
+  REQUEST_TIMEOUT,
+  SIGN_URL,
+  PASS_URL,
+  type XiaomiSession,
+  type XiaomiAuthStatus,
+  type XiaomiSessionScope,
+  type XiaomiCookieLoginInput,
+  type XiaomiPendingLoginContext,
+  mergeCookieHeader as mergeCookieHeaderFromLib,
+  signAndBuildMiIoPayload,
+  buildSignedQueryNonce,
+  stringifyLocation,
+  setCookieHeaderToMap,
+  cookieMapToHeader,
+  generateNonce,
+  sha256Base64,
+  hmacSha256Base64,
+  SESSION_TTL,
+} from './lib/xiaomi-auth';
+import {
+  type RawDevice,
+  type MiotPropQueryItem,
+  type DevicePropSnapshot,
+  type PowerConfirmationOptions,
+  type DeviceRuntimePrevious,
+  sleep,
+  buildMiotPropQueriesForDevice,
+  parseDevicePropResponse,
+  buildDeviceInfoItem,
+  resolveRoomIdForDevice,
+  assignFallbackRoomIds,
+  syncXiaomiDevicesToDb,
+  sanitizeRuntimeForUpsert,
+  normalizeDeviceTelemetryValue,
+} from './lib/xiaomi-devices';
 
 function getEnvCredentials() {
-  return {
-    username: process.env.XIAOMI_USERNAME ?? '',
-    password: process.env.XIAOMI_PASSWORD ?? '',
-  };
-}
-
-function generateNonce(): string {
-  const minutes = Math.floor(Date.now() / 60000);
-  const randomPart = crypto.randomBytes(8);
-  const minuteBuf = Buffer.alloc(4);
-  minuteBuf.writeUInt32BE(minutes);
-  return Buffer.concat([randomPart, minuteBuf]).toString('base64');
-}
-
-function sha256Base64(input: Buffer): string {
-  return crypto.createHash('sha256').update(input).digest('base64');
-}
-
-function hmacSha256Base64(key: Buffer, data: string): string {
-  return crypto.createHmac('sha256', key).update(data).digest().toString('base64');
+  return getEnvCredentialsFromAuthLib();
 }
 
 const SIGN_SALT = 'XIAOMI-PROTOCAL-FLAG';
@@ -232,54 +150,14 @@ async function getPricePerKwhSetting(): Promise<number> {
 }
 
 function buildApiBaseUrl(region?: string): string {
-  const normalized = (region || REGION_DEFAULT).toLowerCase();
-  return normalized === 'cn'
-    ? 'https://api.io.mi.com'
-    : `https://${normalized}.api.io.mi.com`;
-}
-
-function toQueryString(params: Record<string, any>): string {
-  return Object.keys(params)
-    .filter((k) => params[k] !== undefined && params[k] !== null)
-    .sort()
-    .map((k) => {
-      const v = typeof params[k] === 'object' ? JSON.stringify(params[k]) : String(params[k]);
-      return `${encodeURIComponent(k)}=${encodeURIComponent(v)}`;
-    })
-    .join('&');
+  return buildApiBaseUrlFromLib(region);
 }
 
 function mergeCookieHeader(
   baseCookieHeader: string,
   setCookieHeaders?: string[] | string,
 ): string {
-  const jar = new Map<string, string>();
-
-  for (const part of String(baseCookieHeader || '').split(';')) {
-    const item = part.trim();
-    if (!item) continue;
-    const eqIndex = item.indexOf('=');
-    if (eqIndex <= 0) continue;
-    jar.set(item.slice(0, eqIndex), item.slice(eqIndex + 1));
-  }
-
-  const headers = Array.isArray(setCookieHeaders)
-    ? setCookieHeaders
-    : setCookieHeaders
-      ? [setCookieHeaders]
-      : [];
-
-  for (const header of headers) {
-    const firstPart = String(header || '').split(';')[0]?.trim();
-    if (!firstPart) continue;
-    const eqIndex = firstPart.indexOf('=');
-    if (eqIndex <= 0) continue;
-    jar.set(firstPart.slice(0, eqIndex), firstPart.slice(eqIndex + 1));
-  }
-
-  return Array.from(jar.entries())
-    .map(([key, value]) => `${key}=${value}`)
-    .join('; ');
+  return mergeCookieHeaderFromLib(baseCookieHeader, setCookieHeaders);
 }
 
 function getCookieValue(cookieHeader: string, name: string): string {
@@ -303,6 +181,27 @@ function resolveRedirectUrl(location: string, baseUrl: string): string {
   }
 }
 
+function inferRegionFromUrls(...urls: Array<string | null | undefined>): string | undefined {
+  for (const url of urls) {
+    const text = String(url ?? '').trim();
+    if (!text) continue;
+    const queryMatch = text.match(/[?&]region=([a-z0-9]{2,3})/i);
+    if (queryMatch?.[1]) return queryMatch[1].toLowerCase();
+    const hostMatch = text.match(/https:\/\/([a-z0-9]{2,3})\.api\.io\.mi\.com/i);
+    if (hostMatch?.[1]) return hostMatch[1].toLowerCase();
+  }
+  return undefined;
+}
+
+function preferredChallengeVerificationMethod(
+  scope: XiaomiSessionScope,
+  region?: string,
+): 'browser' | 'email_code' {
+  if (scope === 'camera') return 'browser';
+  if (isIntlRegion(region)) return 'browser';
+  return 'email_code';
+}
+
 class XiaomiAdapter {
   private static instance: XiaomiAdapter | null = null;
   private lastRoomMap: Record<string, string | null> = {};
@@ -320,13 +219,7 @@ class XiaomiAdapter {
   }
 
   private async getSession(scope: XiaomiSessionScope = 'main'): Promise<XiaomiSession | null> {
-    const raw = await redis.get(sessionKeyFor(scope));
-    if (!raw) return null;
-    try {
-      return JSON.parse(raw) as XiaomiSession;
-    } catch {
-      return null;
-    }
+    return readSessionFromRedis(scope);
   }
 
   public async peekSession(scope: XiaomiSessionScope = 'main'): Promise<XiaomiSession | null> {
@@ -334,39 +227,27 @@ class XiaomiAdapter {
   }
 
   private async setSession(session: XiaomiSession, scope: XiaomiSessionScope = 'main') {
-    await redis.set(sessionKeyFor(scope), JSON.stringify(session), 'EX', SESSION_TTL);
+    await writeSessionToRedis(session, scope);
   }
 
   private async setPendingLogin(context: XiaomiPendingLoginContext, scope: XiaomiSessionScope = 'main') {
-    await redis.set(pendingLoginKeyFor(scope), JSON.stringify(context), 'EX', 30 * 60);
+    await writePendingLoginToRedis(context, scope);
   }
 
   private async getPendingLogin(scope: XiaomiSessionScope = 'main'): Promise<XiaomiPendingLoginContext | null> {
-    const raw = await redis.get(pendingLoginKeyFor(scope));
-    if (!raw) return null;
-    try {
-      return JSON.parse(raw) as XiaomiPendingLoginContext;
-    } catch {
-      return null;
-    }
+    return readPendingLoginFromRedis(scope);
   }
 
   private async clearPendingLogin(scope: XiaomiSessionScope = 'main') {
-    await redis.del(pendingLoginKeyFor(scope));
+    await clearPendingLoginInRedis(scope);
   }
 
   private async setAuthStatus(status: XiaomiAuthStatus, scope: XiaomiSessionScope = 'main') {
-    await redis.set(authStatusKeyFor(scope), JSON.stringify(status), 'EX', SESSION_TTL);
+    await writeAuthStatusToRedis(status, scope);
   }
 
   public async getAuthStatus(scope: XiaomiSessionScope = 'main'): Promise<XiaomiAuthStatus | null> {
-    const raw = await redis.get(authStatusKeyFor(scope));
-    if (!raw) return null;
-    try {
-      return JSON.parse(raw) as XiaomiAuthStatus;
-    } catch {
-      return null;
-    }
+    return readAuthStatusFromRedis(scope);
   }
 
   public async isLoggedIn(scope: XiaomiSessionScope = 'main'): Promise<boolean> {
@@ -382,14 +263,14 @@ class XiaomiAdapter {
   ): Promise<boolean> {
     const env = scope === 'camera'
       ? {
-          username: process.env.XIAOMI_CAMERA_USERNAME ?? process.env.XIAOMI_USERNAME ?? '',
-          password: process.env.XIAOMI_CAMERA_PASSWORD ?? process.env.XIAOMI_PASSWORD ?? '',
+          username: process.env.XIAOMI_CAMERA_USERNAME ?? '',
+          password: process.env.XIAOMI_CAMERA_PASSWORD ?? '',
         }
       : getEnvCredentials();
     const username = usernameInput || env.username;
     const password = passwordInput || env.password;
     if (!username || !password) {
-      throw new Error(`缺少米家${scope === 'camera' ? '摄像头区' : ''}账号或密码（请在环境变量 ${scope === 'camera' ? 'XIAOMI_CAMERA_USERNAME/XIAOMI_CAMERA_PASSWORD' : 'XIAOMI_USERNAME/XIAOMI_PASSWORD'} 中配置）`);
+      throw new Error(`缺少米家${scope === 'camera' ? '欧洲区' : ''}账号或密码（请在${scope === 'camera' ? '欧洲区登录卡片里输入账号密码，或配置 XIAOMI_CAMERA_USERNAME/XIAOMI_CAMERA_PASSWORD' : '环境变量 XIAOMI_USERNAME/XIAOMI_PASSWORD 中配置'}）`);
     }
     const region = regionInput?.trim() || (scope === 'camera' ? 'de' : REGION_DEFAULT);
 
@@ -870,7 +751,8 @@ class XiaomiAdapter {
       throw new Error('米家验证上下文缺失，无法校验邮箱验证码');
     }
 
-    const sso = resolveSsoBase(pending.region);
+    const pendingRegion = pending.region?.trim() || (scope === 'camera' ? 'de' : REGION_DEFAULT);
+    const sso = resolveSsoBase(pendingRegion);
 
     let cookieHeader = pending.cookieHeader;
     const verifyResult = await this.postFormWithCookieContext(
@@ -1007,29 +889,46 @@ class XiaomiAdapter {
       throw new Error('米家未返回 userId，无法完成登录');
     }
 
+    const inferredRegion =
+      inferRegionFromUrls(finishLocation, endUrl, stsUrl, stsResult.finalUrl) || pendingRegion;
+
     const session: XiaomiSession = {
       userId,
       serviceToken,
       ssecurity,
       username: pending.username,
-      region: pending.region?.trim() || (scope === 'camera' ? 'de' : REGION_DEFAULT),
+      region: inferredRegion,
       loggedAt: new Date().toISOString(),
     };
 
-    await this.verifySession(session);
-    await this.setSession(session, scope);
-    await this.clearPendingLogin(scope);
-    await this.setAuthStatus({
-      state: 'logged_in',
-      needsVerification: false,
-      verificationMethod: null,
-      message: '米家账号登录成功',
-      username: pending.username,
-      codeSentAt: pending.codeSentAt || null,
-      lastAttemptAt: new Date().toISOString(),
-    }, scope);
-
-    return true;
+    try {
+      await this.verifySession(session);
+      await this.setSession(session, scope);
+      await this.clearPendingLogin(scope);
+      await this.setAuthStatus({
+        state: 'logged_in',
+        needsVerification: false,
+        verificationMethod: null,
+        message: '米家账号登录成功',
+        username: pending.username,
+        codeSentAt: null,
+        region: inferredRegion,
+        lastAttemptAt: new Date().toISOString(),
+      }, scope);
+      return true;
+    } catch (err: any) {
+      await this.setAuthStatus({
+        state: 'error',
+        needsVerification: true,
+        verificationMethod: 'email_code',
+        message: err?.message || '米家验证码校验后会话验证失败',
+        username: pending.username,
+        codeSentAt: pending.codeSentAt || null,
+        region: inferredRegion,
+        lastAttemptAt: new Date().toISOString(),
+      }, scope);
+      throw err;
+    }
   }
 
   public async continueLogin(scope: XiaomiSessionScope = 'main'): Promise<boolean> {
@@ -1181,6 +1080,7 @@ class XiaomiAdapter {
     const scopeDefault2 = scope === 'camera' ? 'de' : REGION_DEFAULT;
     const effectiveRegion2 = (regionInput?.trim().toLowerCase()) || scopeDefault2;
     const sso2 = resolveSsoBase(effectiveRegion2);
+    const challengeVerificationMethod = preferredChallengeVerificationMethod(scope, effectiveRegion2);
     console.debug('[XiaomiAdapter] step2 调用 serviceLoginAuth2 账密校验', {
       user: username,
       sid: data.sid,
@@ -1311,7 +1211,7 @@ class XiaomiAdapter {
               return undefined;
             }
           })(),
-          verificationMethod: payload?.notificationUrl ? 'email_code' : 'browser',
+          verificationMethod: payload?.notificationUrl ? challengeVerificationMethod : 'browser',
           codeSentAt: null,
         lastAttemptAt: new Date().toISOString(),
         region: regionInput || (scope === 'camera' ? 'de' : REGION_DEFAULT),
@@ -1319,9 +1219,11 @@ class XiaomiAdapter {
       await this.setAuthStatus({
         state: payload?.notificationUrl ? 'challenge_required' : 'error',
         needsVerification: !!payload?.notificationUrl,
-          verificationMethod: payload?.notificationUrl ? 'email_code' : 'browser',
+          verificationMethod: payload?.notificationUrl ? challengeVerificationMethod : 'browser',
           message: payload?.notificationUrl
-            ? '需要米家邮箱验证码，请先发送验证码，再输入验证码完成登录'
+            ? challengeVerificationMethod === 'browser'
+              ? '需要米家安全验证，请点击打开验证页完成验证后再回来继续登录'
+              : '需要米家邮箱验证码，请先发送验证码，再输入验证码完成登录'
             : '登录已通过初步校验，但仍需完成米家安全验证',
         notificationUrl: payload?.notificationUrl,
         securityStatus: payload?.securityStatus ?? null,
@@ -1471,7 +1373,7 @@ class XiaomiAdapter {
     const regionLower = (session.region || REGION_DEFAULT).toLowerCase();
     const isIntl = regionLower !== 'cn';
     const intlHostCandidates = isIntl
-      ? Array.from(new Set([regionLower, 'de', 'at', 'us', 'sg', 'i2', 'ru', 'tw', 'in'].filter((x) => x && x.toLowerCase() !== 'cn')))
+      ? Array.from(new Set([regionLower, 'de', 'fr', 'at', 'us', 'sg', 'i2', 'ru', 'tw', 'in'].filter((x) => x && x.toLowerCase() !== 'cn')))
       : ['cn'];
     const signByRegion = async (regionForSign: string) => {
       const sessionSnapshot: XiaomiSession = { ...session, region: regionForSign };
@@ -1716,7 +1618,12 @@ class XiaomiAdapter {
         }).catch(() => {});
       })();
       // #endregion
-      throw new Error(`米家会话串不可用：${err?.message || err}`);
+      const rawMessage = String(err?.message || err || '');
+      const region = String(session.region || REGION_DEFAULT).toUpperCase();
+      if (/requestIo region=.*HTTP 401/i.test(rawMessage) || /auth error/i.test(rawMessage)) {
+        throw new Error(`米家会话已失效或地区不匹配（当前地区 ${region}），请重新登录对应地区账号`);
+      }
+      throw new Error(`米家会话串不可用：${rawMessage}`);
     }
   }
 
@@ -1756,24 +1663,18 @@ class XiaomiAdapter {
           const props = await this.batchGetProps(session, list);
           for (let i = 0; i < list.length; i++) {
             const raw = list[i];
-            const roomId = this.resolveRoomId(rooms, raw);
             const p = props[raw.did] ?? {};
-            listReal.push({
-              did: raw.did,
-              name: raw.name ?? raw.model ?? `device_${i + 1}`,
-              model: raw.model ?? 'unknown',
-              online: raw.isOnline === true || raw.status === 1,
-              roomId,
-              power: p.power,
-              powerW: p.powerW,
-              currentA: p.currentA,
-              voltageV: p.voltageV ?? 220,
-              totalKwh: p.totalKwh,
-              sourceRegion: session?.region || 'cn',
-              sourceScope: 'main',
-            });
+            listReal.push(buildDeviceInfoItem(
+              raw,
+              i,
+              rooms,
+              existingDevices,
+              this.lastRoomMap,
+              p,
+              session?.region,
+            ));
           }
-          this.assignFallbackRoomIds(listReal, rooms, existingDevices);
+          assignFallbackRoomIds(listReal, rooms, existingDevices, this.lastRoomMap);
         } else if (devicePayload !== null && devicePayload !== undefined) {
           console.warn('[XiaomiAdapter] fetchDevices 响应非数组，内容片段=', JSON.stringify(devicePayload).slice(0, 600));
         }
@@ -1796,7 +1697,7 @@ class XiaomiAdapter {
     if (list.length === 0) return {};
     const result: Record<string, DevicePropSnapshot> = {};
     const onlineDevices = list.filter((d) => d.isOnline === true);
-    const payload = onlineDevices.flatMap((device) => this.buildPropQueries(device));
+    const payload = onlineDevices.flatMap((device) => buildMiotPropQueriesForDevice(device));
 
     if (payload.length === 0) return {};
 
@@ -1813,22 +1714,15 @@ class XiaomiAdapter {
               ? (resp as any).result.list
               : [];
       if (Array.isArray(items)) {
-        const modelMap = new Map(onlineDevices.map((device) => [device.did, device.model ?? '']));
-        for (const item of items) {
-          const did = item?.did ?? item?.did2;
-          if (!did || item?.code && item.code !== 0) continue;
-          if (!result[did]) result[did] = {};
-          this.assignPropValue(result[did], modelMap.get(did) ?? '', item?.siid, item?.piid, item?.value);
+        for (const device of onlineDevices) {
+          result[device.did] = parseDevicePropResponse(device, items);
         }
       }
 
       for (const did of Object.keys(result)) {
         const snapshot = result[did];
-        if (snapshot.power == null && typeof snapshot.powerW === 'number') {
+        if (snapshot.power == null && typeof snapshot.powerW === 'number' && Number.isFinite(snapshot.powerW)) {
           snapshot.power = snapshot.powerW > 0;
-        }
-        if ((snapshot.powerW == null || Number.isNaN(snapshot.powerW)) && typeof snapshot.currentA === 'number' && typeof snapshot.voltageV === 'number') {
-          snapshot.powerW = Number((snapshot.currentA * snapshot.voltageV).toFixed(1));
         }
       }
     } catch (e: any) {
@@ -1936,23 +1830,17 @@ class XiaomiAdapter {
     }
 
     if (siid === 3 && piid === 6 && numericValue != null) {
-      snapshot.powerW = model.includes('lxzn.switch.cbcsmj')
-        ? Number(numericValue.toFixed(1))
-        : Number(numericValue.toFixed(1));
+      snapshot.powerW = normalizeDeviceTelemetryValue(model, 'powerW', numericValue);
       return;
     }
 
     if (siid === 3 && piid === 2 && numericValue != null) {
-      snapshot.currentA = model.includes('lxzn.switch.cbcsmj') || numericValue > 100
-        ? Number((numericValue / 1000).toFixed(3))
-        : Number(numericValue.toFixed(3));
+      snapshot.currentA = normalizeDeviceTelemetryValue(model, 'currentA', numericValue);
       return;
     }
 
     if (siid === 3 && piid === 3 && numericValue != null) {
-      snapshot.voltageV = model.includes('lxzn.switch.cbcsmj') || numericValue > 400
-        ? Number((numericValue / 10).toFixed(1))
-        : Number(numericValue.toFixed(1));
+      snapshot.voltageV = normalizeDeviceTelemetryValue(model, 'voltageV', numericValue);
       return;
     }
 
@@ -1962,17 +1850,17 @@ class XiaomiAdapter {
     }
 
     if (siid === 2 && piid === 2 && numericValue != null) {
-      snapshot.powerW = Number(numericValue.toFixed(1));
+      snapshot.powerW = normalizeDeviceTelemetryValue(model, 'powerW', numericValue);
       return;
     }
 
     if (siid === 2 && piid === 3 && numericValue != null) {
-      snapshot.currentA = numericValue > 100 ? Number((numericValue / 1000).toFixed(3)) : Number(numericValue.toFixed(3));
+      snapshot.currentA = normalizeDeviceTelemetryValue(model, 'currentA', numericValue);
       return;
     }
 
     if (siid === 2 && piid === 4 && numericValue != null) {
-      snapshot.voltageV = numericValue > 400 ? Number((numericValue / 10).toFixed(1)) : Number(numericValue.toFixed(1));
+      snapshot.voltageV = normalizeDeviceTelemetryValue(model, 'voltageV', numericValue);
       return;
     }
 
@@ -1984,13 +1872,7 @@ class XiaomiAdapter {
   }
 
   private normalizeTotalKwh(model: string, numericValue: number): number {
-    if (model.includes('lxzn.switch.cbcsmj')) {
-      const normalized = Number.isInteger(numericValue) ? numericValue / 100 : numericValue;
-      return Number(normalized.toFixed(3));
-    }
-
-    const normalized = numericValue > 1000 ? numericValue / 1000 : numericValue;
-    return Number(normalized.toFixed(3));
+    return normalizeDeviceTelemetryValue(model, 'totalKwh', numericValue) ?? numericValue;
   }
 
   private parseHistoryNumericValue(rawValue: unknown): number | null {
@@ -2559,92 +2441,22 @@ class XiaomiAdapter {
       where: { did: { startsWith: 'miot_device_' } },
     });
 
-    const session = await this.getSession();
-    if (!session || /^mock_/.test(session.serviceToken)) {
+    const mergedDevices: XiaomiDeviceInfo[] = [];
+    const mainSession = await this.getSession('main');
+    if (mainSession && !/^mock_/.test(mainSession.serviceToken)) {
+      mergedDevices.push(...(await this.fetchDevices()));
+    }
+
+    const cameraSession = await this.getSession('camera');
+    if (cameraSession && !/^mock_/.test(cameraSession.serviceToken)) {
+      mergedDevices.push(...(await this.fetchCameraDevices()));
+    }
+
+    if (mergedDevices.length === 0) {
       throw new Error('米家尚未完成真实登录，当前没有可用的真实会话。请先在系统设置里重新登录米家账号。');
     }
 
-    const devices = await this.fetchDevices();
-    if (devices.length === 0) {
-      throw new Error('米家登录已建立，但本次没有拉取到任何真实设备。请检查该账号下是否真的已绑定设备，或先完成米家安全验证。');
-    }
-
-    const [defaultSite, rooms] = await Promise.all([
-      prisma.site.findFirst({
-        where: { isPrimary: true },
-        select: { id: true },
-        orderBy: { createdAt: 'asc' },
-      }),
-      prisma.room.findMany({
-        select: {
-          id: true,
-          siteId: true,
-        },
-      }),
-    ]);
-    const fallbackSiteId = defaultSite?.id;
-    if (!fallbackSiteId) {
-      throw new Error('系统中尚未配置默认区域，暂时无法同步设备');
-    }
-    const roomSiteMap = new Map(rooms.map((room) => [room.id, room.siteId]));
-
-    const now = new Date();
-    for (const device of devices) {
-      const existing = await prisma.device.findUnique({
-        where: { did: device.did },
-        select: { name: true, siteId: true },
-      });
-      const siteId =
-        (device.roomId ? roomSiteMap.get(device.roomId) : null) ??
-        device.siteId ??
-        existing?.siteId ??
-        fallbackSiteId;
-
-      await prisma.device.upsert({
-        where: { did: device.did },
-        update: {
-          siteId,
-          name: existing?.name?.trim() || device.name,
-          model: device.model,
-          roomId: device.roomId,
-          status: (device.online ? 'online' : 'offline') as DeviceStatus,
-          power: device.power ?? null,
-          powerW: device.powerW ?? null,
-          currentA: device.currentA ?? null,
-          voltageV: device.voltageV ?? null,
-          totalKwh: device.totalKwh ?? null,
-          lastSyncAt: now,
-        },
-        create: {
-          did: device.did,
-          siteId,
-          name: device.name,
-          model: device.model,
-          roomId: device.roomId,
-          status: (device.online ? 'online' : 'offline') as DeviceStatus,
-          power: device.power ?? null,
-          powerW: device.powerW ?? null,
-          currentA: device.currentA ?? null,
-          voltageV: device.voltageV ?? null,
-          totalKwh: device.totalKwh ?? null,
-          lastSyncAt: now,
-        },
-      });
-    }
-    await writeOperation(
-      operatorUserId,
-      OperationType.sync_devices,
-      null,
-      {
-        action: 'sync_devices',
-        actionLabel: '同步米家设备',
-        source: actorContext?.source,
-        sourceLabel: actorContext?.sourceLabel,
-        totalCount: devices.length,
-        note: `同步 ${devices.length} 台设备`,
-      },
-      true,
-    );
+    await syncXiaomiDevicesToDb(mergedDevices, operatorUserId, actorContext);
   }
 
   private async getDeviceAuditDetails(deviceDid: string): Promise<{
@@ -2711,15 +2523,29 @@ class XiaomiAdapter {
         true,
         confirmationOptions,
       );
+      const previous = await prisma.device.findUnique({
+        where: { did: deviceDid },
+        select: { powerW: true, currentA: true, voltageV: true, totalKwh: true, power: true },
+      }) as DeviceRuntimePrevious | null;
+      const safe = sanitizeRuntimeForUpsert(
+        {
+          powerW: confirmed.powerW,
+          currentA: confirmed.currentA,
+          voltageV: confirmed.voltageV,
+          totalKwh: confirmed.totalKwh,
+          online: true,
+        },
+        previous,
+      );
       await prisma.device.update({
         where: { did: deviceDid },
         data: {
-            status: DeviceStatus.online,
+          status: DeviceStatus.online,
           power: true,
-          powerW: confirmed.powerW ?? null,
-          currentA: confirmed.currentA ?? null,
-          voltageV: confirmed.voltageV ?? null,
-          totalKwh: confirmed.totalKwh ?? null,
+          powerW: safe.powerW,
+          currentA: safe.currentA,
+          voltageV: safe.voltageV,
+          totalKwh: safe.totalKwh,
           lastSyncAt: new Date(),
         },
       });
@@ -2796,15 +2622,29 @@ class XiaomiAdapter {
         }
       }
       const confirmed = await this.confirmDevicePowerState(session, deviceDid, false);
+      const previous = await prisma.device.findUnique({
+        where: { did: deviceDid },
+        select: { powerW: true, currentA: true, voltageV: true, totalKwh: true, power: true },
+      }) as DeviceRuntimePrevious | null;
+      const safe = sanitizeRuntimeForUpsert(
+        {
+          powerW: confirmed.powerW ?? 0,
+          currentA: confirmed.currentA ?? 0,
+          voltageV: confirmed.voltageV,
+          totalKwh: confirmed.totalKwh,
+          online: true,
+        },
+        previous,
+      );
       await prisma.device.update({
         where: { did: deviceDid },
         data: {
-            status: DeviceStatus.online,
+          status: DeviceStatus.online,
           power: false,
-          powerW: confirmed.powerW ?? 0,
-          currentA: confirmed.currentA ?? 0,
-          voltageV: confirmed.voltageV ?? null,
-          totalKwh: confirmed.totalKwh ?? null,
+          powerW: safe.powerW ?? 0,
+          currentA: safe.currentA ?? 0,
+          voltageV: safe.voltageV,
+          totalKwh: safe.totalKwh,
           lastSyncAt: new Date(),
         },
       });
@@ -2908,11 +2748,26 @@ class XiaomiAdapter {
     }
     const roomSiteMap = new Map(rooms.map((room) => [room.id, room.siteId]));
 
+    const now = new Date();
     for (const device of devices) {
       const siteId =
         (device.roomId ? roomSiteMap.get(device.roomId) : null) ??
         device.siteId ??
         fallbackSiteId;
+      const previous = await prisma.device.findUnique({
+        where: { did: device.did },
+        select: { powerW: true, currentA: true, voltageV: true, totalKwh: true, power: true },
+      }) as DeviceRuntimePrevious | null;
+      const safe = sanitizeRuntimeForUpsert(
+        {
+          powerW: device.powerW,
+          currentA: device.currentA,
+          voltageV: device.voltageV,
+          totalKwh: device.totalKwh,
+          online: device.online,
+        },
+        previous,
+      );
       await prisma.device.upsert({
         where: { did: device.did },
         update: {
@@ -2920,13 +2775,13 @@ class XiaomiAdapter {
           name: device.name,
           model: device.model,
           roomId: device.roomId ?? undefined,
-          status: (device.online ? 'online' : 'offline') as DeviceStatus,
-          power: device.power ?? null,
-          powerW: device.powerW ?? null,
-          currentA: device.currentA ?? null,
-          voltageV: device.voltageV ?? null,
-          totalKwh: device.totalKwh ?? null,
-          lastSyncAt: new Date(),
+          status: (safe.online ? 'online' : 'offline') as DeviceStatus,
+          power: safe.power,
+          powerW: safe.powerW,
+          currentA: safe.currentA,
+          voltageV: safe.voltageV,
+          totalKwh: safe.totalKwh,
+          lastSyncAt: now,
         },
         create: {
           did: device.did,
@@ -2934,15 +2789,52 @@ class XiaomiAdapter {
           name: device.name,
           model: device.model,
           roomId: device.roomId,
-          status: (device.online ? 'online' : 'offline') as DeviceStatus,
-          power: device.power ?? null,
-          powerW: device.powerW ?? null,
-          currentA: device.currentA ?? null,
-          voltageV: device.voltageV ?? null,
-          totalKwh: device.totalKwh ?? null,
-          lastSyncAt: new Date(),
+          status: (safe.online ? 'online' : 'offline') as DeviceStatus,
+          power: safe.power,
+          powerW: safe.powerW,
+          currentA: safe.currentA,
+          voltageV: safe.voltageV,
+          totalKwh: safe.totalKwh,
+          lastSyncAt: now,
         },
       });
+    }
+
+    if (devices.length > 0) {
+      const currentDidSet = new Set(devices.map((device) => device.did));
+      const existingManagedDevices = await prisma.device.findMany({
+        where: {
+          NOT: { did: { startsWith: 'LAN_' } },
+        },
+        select: {
+          did: true,
+          name: true,
+          model: true,
+        },
+      });
+
+      for (const device of existingManagedDevices) {
+        if (currentDidSet.has(device.did)) continue;
+        const category = inferDeviceCategory({ name: device.name, model: device.model });
+        if (
+          category === DeviceCategory.CAMERA ||
+          category === DeviceCategory.WIFI_AP ||
+          category === DeviceCategory.FIVE_G_CPE
+        ) {
+          continue;
+        }
+
+        await prisma.device.update({
+          where: { did: device.did },
+          data: {
+            status: DeviceStatus.offline,
+            power: false,
+            powerW: 0,
+            currentA: 0,
+            lastSyncAt: now,
+          },
+        });
+      }
     }
   }
 
@@ -2972,7 +2864,7 @@ class XiaomiAdapter {
     await this.realtimeRefreshPromise;
   }
 
-  // ──────────────── MiOT Spec Action 通用封装 ────────────────
+  // ──────────────── MiOT Spec Action generic wrapper ────────────────
 
   public async callDeviceAction(
     did: string,
@@ -2994,14 +2886,14 @@ class XiaomiAdapter {
     return result;
   }
 
-  // ──────────────── 摄像头 Spec 映射（MBC23 / C300 / C200 等） ────────────────
+  // ──────────────── Camera Spec mapping (MBC23 / C300 / C200 etc.) ────────────────
 
   private getCameraSpecForModel(model: string): {
     rtsp: { siid: number; aiid_start: number; aiid_stop?: number };
     ptz?: { siid: number; aiid_move: number; aiid_stop?: number };
   } {
     const m = (model || '').toLowerCase();
-    // Xiaomi Smart Camera C301 (MBC23) - 欧洲区版
+    // Xiaomi Smart Camera C301 (MBC23) - EU version
     if (m.includes('mbc23') || m.includes('c301') || m.includes('xiaomi.camera.c301')) {
       return {
         rtsp: { siid: 18, aiid_start: 1 },
@@ -3028,14 +2920,14 @@ class XiaomiAdapter {
         ptz: { siid: 19, aiid_move: 1, aiid_stop: 2 },
       };
     }
-    // 默认通用摄像头 Spec（绝大多数小米摄像头统一）
+    // Default generic camera Spec (shared by most Xiaomi cameras)
     return {
       rtsp: { siid: 18, aiid_start: 1 },
       ptz: { siid: 19, aiid_move: 1, aiid_stop: 2 },
     };
   }
 
-  // ──────────────── 摄像头：开启 / 关闭 RTSP 流 ────────────────
+  // ──────────────── Camera: start / stop RTSP stream ────────────────
 
   public async startRTSPStream(
     did: string,
@@ -3049,7 +2941,7 @@ class XiaomiAdapter {
   }> {
     const spec = this.getCameraSpecForModel(model);
     const raw = await this.callDeviceAction(did, spec.rtsp.siid, spec.rtsp.aiid_start, [], scope);
-    // Xiaomi 返回的结果通常在 {result: {out: [...]}} 或直接是数组
+    // Xiaomi usually returns the result in {result: {out: [...]}} or directly as an array
     let outArr: any[] = [];
     if (Array.isArray(raw)) outArr = raw;
     else if (Array.isArray(raw?.out)) outArr = raw.out;
@@ -3059,7 +2951,7 @@ class XiaomiAdapter {
       const arr = vals.find((v: any) => Array.isArray(v)) as any[] | undefined;
       if (arr) outArr = arr;
     }
-    // stream_address / stream_auth_token 在 out 数组的前两项
+    // stream_address / stream_auth_token are the first two items of the out array
     const streamAddress = String(
       outArr[0] ?? raw?.stream_address ?? raw?.['stream-address'] ?? raw?.address ?? '',
     ).trim();
@@ -3070,7 +2962,7 @@ class XiaomiAdapter {
       console.error('[XiaomiAdapter] startRTSPStream 未解析到 streamAddress，原始返回：', JSON.stringify(raw).slice(0, 800));
       throw new Error('米家摄像头未返回 stream_address，请确认设备型号与 Spec 映射是否匹配');
     }
-    // 拼接成带鉴权的 RTSP URL（局域网直连，不走云）
+    // Build an authenticated RTSP URL (direct LAN, no cloud round-trip)
     let rtspUrl = streamAddress;
     if (streamAuthToken) {
       try {
@@ -3092,7 +2984,7 @@ class XiaomiAdapter {
     };
   }
 
-  // ──────────────── 摄像头：云台 PTZ 控制 ────────────────
+  // ──────────────── Camera: PTZ control ────────────────
 
   public async moveCameraPTZ(
     did: string,
@@ -3105,8 +2997,8 @@ class XiaomiAdapter {
     if (!spec.ptz) {
       throw new Error(`当前摄像头型号 ${model} 未配置云台 Spec 映射`);
     }
-    // PTZ move 的 input：
-    // [0] = direction: 0=左,1=右,2=上,3=下, 或用字符串
+    // PTZ move input:
+    // [0] = direction: 0=left,1=right,2=up,3=down, or a string
     // [1] = speed: 0-100
     const dirMap: Record<string, number> = { left: 0, right: 1, up: 2, down: 3 };
     if (direction === 'stop') {
@@ -3126,7 +3018,7 @@ class XiaomiAdapter {
     return true;
   }
 
-  // ──────────────── 摄像头区专用：获取摄像头设备列表 ────────────────
+  // ──────────────── Camera region: fetch camera device list ────────────────
 
   public async fetchCameraDevices(): Promise<XiaomiDeviceInfo[]> {
     const session = await this.getSession('camera');

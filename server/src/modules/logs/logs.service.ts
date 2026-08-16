@@ -10,10 +10,11 @@ import {
   getOperationActorLabel,
   getOperationCategory,
   getOperationCategoryLabel,
+  getOperationResultMeta,
   getOperationSourceLabel,
   getOperationTargetInfo,
   OperationActorContext,
-  parseOperationDetails,
+  parseOperationDetailsPayload,
 } from '../../lib/operation-log';
 import { formatRoomDisplayName } from '../../lib/room-display';
 
@@ -49,39 +50,6 @@ interface PaginatedResult<T> {
   total: number;
   page: number;
   pageSize: number;
-}
-
-function getOperationResultMeta(
-  success: boolean,
-  rawDetails: string,
-): { label: string; tone: 'success' | 'failure' | 'warning' } {
-  const parsed = parseOperationDetails(rawDetails);
-  if (typeof parsed !== 'string') {
-    if (typeof parsed.resultLabel === 'string' && parsed.resultLabel.trim()) {
-      return {
-        label: parsed.resultLabel.trim(),
-        tone:
-          parsed.resultLabel.includes('跳过') || parsed.resultLabel.includes('拦截')
-            ? 'warning'
-            : success
-              ? 'success'
-              : 'failure',
-      };
-    }
-
-    if (parsed.blocked) {
-      return { label: '拦截', tone: 'warning' };
-    }
-
-    if (typeof parsed.action === 'string' && parsed.action.includes('skipped')) {
-      return { label: '跳过', tone: 'warning' };
-    }
-  }
-
-  return {
-    label: success ? '成功' : '失败',
-    tone: success ? 'success' : 'failure',
-  };
 }
 
 class LogsService {
@@ -149,11 +117,10 @@ class LogsService {
       const targetInfo = getOperationTargetInfo(log.details);
       const detailsText = formatOperationDetailsText(log.type, log.details);
       const resultMeta = getOperationResultMeta(log.success, log.details);
-      const parsedDetails = parseOperationDetails(log.details);
-      const sourceLabel =
-        typeof parsedDetails === 'string'
-          ? null
-          : (parsedDetails.sourceLabel || getOperationSourceLabel(parsedDetails.source));
+      const parsedDetails = parseOperationDetailsPayload(log.details);
+      const sourceLabel = parsedDetails
+        ? (parsedDetails.sourceLabel || getOperationSourceLabel(parsedDetails.source))
+        : null;
       const resolvedCategory = getOperationCategory(log.type, log.details);
       const detailsWithResult = detailsText
         ? `${detailsText}\n结果：${resultMeta.label}`

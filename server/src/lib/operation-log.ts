@@ -82,6 +82,13 @@ export type OperationLogCategory =
   | 'system'
   | 'other';
 
+export type OperationResultTone = 'success' | 'failure' | 'warning';
+
+export interface OperationResultMeta {
+  label: string;
+  tone: OperationResultTone;
+}
+
 export function serializeOperationDetails(
   details: string | OperationDetailsPayload,
 ): string {
@@ -117,6 +124,13 @@ export function parseOperationDetails(
   }
 
   return typeof current === 'string' ? current : details;
+}
+
+export function parseOperationDetailsPayload(
+  details: string | null | undefined,
+): OperationDetailsPayload | null {
+  const parsed = parseOperationDetails(details);
+  return typeof parsed === 'string' ? null : parsed;
 }
 
 export function getOperationSourceLabel(source?: string | null): string | null {
@@ -161,6 +175,47 @@ export function getDefaultActionLabel(type: OperationType): string {
     default:
       return String(type);
   }
+}
+
+function textOrNull(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  return text || null;
+}
+
+function numOrNull(value: unknown): number | null {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+export function getOperationResultMeta(
+  success: boolean,
+  rawDetails: string,
+): OperationResultMeta {
+  const parsed = parseOperationDetailsPayload(rawDetails);
+  if (parsed) {
+    const explicitLabel = textOrNull(parsed.resultLabel);
+    if (explicitLabel) {
+      const containsSkipOrBlock =
+        explicitLabel.includes('跳过') || explicitLabel.includes('拦截');
+      return {
+        label: explicitLabel,
+        tone: containsSkipOrBlock ? 'warning' : success ? 'success' : 'failure',
+      };
+    }
+    if (parsed.blocked) {
+      return { label: '拦截', tone: 'warning' };
+    }
+    const action = textOrNull(parsed.action);
+    if (action && action.includes('skipped')) {
+      return { label: '跳过', tone: 'warning' };
+    }
+  }
+
+  return {
+    label: success ? '成功' : '失败',
+    tone: success ? 'success' : 'failure',
+  };
 }
 
 function pushLine(lines: string[], label: string, value: unknown) {

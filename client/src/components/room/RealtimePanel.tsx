@@ -15,76 +15,19 @@ import { cn } from '@/lib/utils';
 import { ValueWithUnit } from '@/components/ui/value-with-unit';
 import { FeeHint } from '@/components/ui/fee-hint';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import {
+  energyFormatter0,
+  energyFormatter1,
+  energyFormatter2,
+  formatPower as formatPowerShared,
+  formatEnergy as formatEnergyShared,
+  formatCost,
+  progressColorForPercent,
+} from '@/lib/format';
 
 interface RealtimePanelProps {
   realtime: RealtimeEnergyData;
   pricePerKwh: number;
-}
-
-const numberFormatter0 = new Intl.NumberFormat('de-AT', {
-  minimumFractionDigits: 0,
-  maximumFractionDigits: 0,
-});
-
-const numberFormatter1 = new Intl.NumberFormat('de-AT', {
-  minimumFractionDigits: 1,
-  maximumFractionDigits: 1,
-});
-
-const powerFormatter = new Intl.NumberFormat('de-AT', {
-  minimumFractionDigits: 1,
-  maximumFractionDigits: 1,
-});
-
-const numberFormatter2 = new Intl.NumberFormat('de-AT', {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-function formatPower(value: number) {
-  return (
-    <ValueWithUnit
-      value={powerFormatter.format(value)}
-      unit="W"
-      valueClassName="font-bold"
-    />
-  );
-}
-
-function formatEnergy(value: number, digits: 0 | 1 | 2 = 2) {
-  const formatter =
-    digits === 0 ? numberFormatter0 : digits === 1 ? numberFormatter1 : numberFormatter2;
-  return (
-    <ValueWithUnit
-      value={formatter.format(value)}
-      unit="kWh"
-      valueClassName="font-semibold"
-    />
-  );
-}
-
-function getBadgeVariant(
-  status: RoomStatus
-): 'default' | 'success' | 'warning' | 'danger' | 'destructive' {
-  switch (status) {
-    case RoomStatus.NORMAL:
-      return 'success';
-    case RoomStatus.WARNING_80:
-      return 'warning';
-    case RoomStatus.WARNING_90:
-    case RoomStatus.WARNING_95:
-    case RoomStatus.CUTOFF:
-      return 'danger';
-    default:
-      return 'default';
-  }
-}
-
-function getProgressColor(percent: number): string {
-  if (percent >= 95) return 'bg-red-500';
-  if (percent >= 90) return 'bg-orange-500';
-  if (percent >= 80) return 'bg-yellow-500';
-  return 'bg-green-500';
 }
 
 interface MetricCardProps {
@@ -93,6 +36,23 @@ interface MetricCardProps {
   value: ReactNode;
   iconBg: string;
   extra?: ReactNode;
+}
+
+const STATUS_BADGE_VARIANT: Readonly<Record<RoomStatus, 'default' | 'success' | 'warning' | 'danger' | 'destructive'>> = {
+  [RoomStatus.NORMAL]: 'success',
+  [RoomStatus.WARNING_80]: 'warning',
+  [RoomStatus.WARNING_90]: 'danger',
+  [RoomStatus.WARNING_95]: 'danger',
+  [RoomStatus.CUTOFF]: 'danger',
+  [RoomStatus.OFFLINE]: 'default',
+} as const;
+
+function formatPower(value: number) {
+  return formatPowerShared(value, { valueClassName: 'font-bold' });
+}
+
+function formatEnergy(value: number, digits: 0 | 1 | 2 = 2) {
+  return formatEnergyShared(value, digits, { valueClassName: 'font-semibold' });
 }
 
 function MetricCard({ icon, label, value, iconBg, extra }: MetricCardProps) {
@@ -118,12 +78,7 @@ export function RealtimePanel({
     realtime.dailyLimit > 0
       ? Math.min(100, (realtime.todayUsage / realtime.dailyLimit) * 100)
       : 0;
-  const cost = new Intl.NumberFormat('de-AT', {
-    style: 'currency',
-    currency: 'EUR',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  }).format(realtime.todayUsage * pricePerKwh);
+  const cost = formatCost(realtime.todayUsage * pricePerKwh);
 
   return (
     <div className="space-y-4">
@@ -159,7 +114,7 @@ export function RealtimePanel({
           extra={
             realtime.deviceOnline ? (
               <Badge
-                variant={getBadgeVariant(realtime.status)}
+                variant={STATUS_BADGE_VARIANT[realtime.status]}
                 className="mt-2 inline-flex"
               >
                 设备在线
@@ -169,7 +124,7 @@ export function RealtimePanel({
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Badge
-                      variant={getBadgeVariant(realtime.status)}
+                      variant={STATUS_BADGE_VARIANT[realtime.status]}
                       className="mt-2 inline-flex cursor-help"
                     >
                       设备离线
@@ -196,7 +151,7 @@ export function RealtimePanel({
             </div>
             <div className="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
               <ValueWithUnit
-                value={numberFormatter2.format(realtime.todayUsage)}
+                value={energyFormatter2.format(realtime.todayUsage)}
                 unit="kWh"
                 className="break-words text-2xl sm:text-3xl"
                 valueClassName="font-bold"
@@ -207,7 +162,7 @@ export function RealtimePanel({
             </div>
             <Progress
               value={percent}
-              indicatorClassName={getProgressColor(percent)}
+              indicatorClassName={progressColorForPercent(percent)}
               className="h-2 mb-2"
             />
             <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
@@ -234,7 +189,7 @@ export function RealtimePanel({
                 <div className="text-sm text-muted-foreground mb-1">昨日</div>
                 <div className="break-words text-base font-semibold sm:text-lg">
                   <ValueWithUnit
-                    value={numberFormatter2.format(realtime.yesterdayUsage)}
+                    value={energyFormatter2.format(realtime.yesterdayUsage)}
                     unit="kWh"
                     valueClassName="font-semibold"
                   />
@@ -244,7 +199,7 @@ export function RealtimePanel({
                 <div className="text-sm text-muted-foreground mb-1">本月</div>
                 <div className="break-words text-base font-semibold sm:text-lg">
                   <ValueWithUnit
-                    value={numberFormatter1.format(realtime.monthUsage)}
+                    value={energyFormatter1.format(realtime.monthUsage)}
                     unit="kWh"
                     valueClassName="font-semibold"
                   />
@@ -254,7 +209,7 @@ export function RealtimePanel({
                 <div className="text-sm text-muted-foreground mb-1">本年</div>
                 <div className="break-words text-base font-semibold sm:text-lg">
                   <ValueWithUnit
-                    value={numberFormatter0.format(realtime.yearUsage)}
+                    value={energyFormatter0.format(realtime.yearUsage)}
                     unit="kWh"
                     valueClassName="font-semibold"
                   />

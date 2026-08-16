@@ -32,6 +32,7 @@ import {
 } from '../../lib/business-time';
 import { OperationActorContext } from '../../lib/operation-log';
 import { formatRoomDisplayName, normalizeRoomAnnotation } from '../../lib/room-display';
+import { extractCameraRuntime, extractFiveGCpeRuntime, extractWifiApRuntime } from '../../lib/device-runtime';
 
 const ROOM_POWER_ACTION_WINDOW_MS = 3 * 60 * 1000;
 const AUTO_RESTORE_CONFIRMATION_OPTIONS = {
@@ -141,42 +142,9 @@ function toDeviceItem(d: any): DeviceItem {
   const source = (
     parsedModel && typeof parsedModel.source === 'string' ? parsedModel.source : null
   ) as DeviceItem['source'];
-  let cameraRuntime: DeviceItem['camera'] = null;
-  if (parsedModel && parsedModel.camera && typeof parsedModel.camera === 'object') {
-    const c = parsedModel.camera as Record<string, unknown>;
-    const candidates = Array.isArray((c as any).snapshotCandidates) ? (c as any).snapshotCandidates : null;
-    const manualUrl = typeof (c as any).manualSnapshotUrl === 'string' ? (c as any).manualSnapshotUrl : null;
-    const firstHttp = (manualUrl && /^https?:/i.test(manualUrl))
-      ? { url: manualUrl }
-      : (candidates as Array<Record<string, unknown>> | null)?.find((x) =>
-          typeof x?.url === 'string' && /^https?:/i.test(x.url as string),
-        );
-    const brandRaw = typeof (c as any).manualBrand === 'string' ? (c as any).manualBrand : (c as any).brand;
-    const modelRaw = typeof (c as any).manualModel === 'string' ? (c as any).manualModel : (c as any).model;
-    cameraRuntime = {
-      online: prismaStatus === 'online' && !!(c as any).online,
-      snapshotUrl: firstHttp && typeof firstHttp.url === 'string' ? firstHttp.url : null,
-      streamUrl: null,
-      hdStreamUrl: null,
-      brand: typeof brandRaw === 'string' ? brandRaw : null,
-      model: typeof modelRaw === 'string' ? modelRaw : null,
-      hasAudio: typeof (c as any).hasAudio === 'boolean' ? (c as any).hasAudio : undefined,
-      hasNightVision: typeof (c as any).hasNightVision === 'boolean' ? (c as any).hasNightVision : undefined,
-      lastMotionAt: typeof (c as any).lastMotionAt === 'string' ? (c as any).lastMotionAt : null,
-    };
-  }
-  let wifiApRuntime: DeviceItem['wifiAp'] = null;
-  if (parsedModel && parsedModel.wifiAp && typeof parsedModel.wifiAp === 'object') {
-    wifiApRuntime = parsedModel.wifiAp as any;
-  } else if (parsedModel && parsedModel.runtime && typeof parsedModel.runtime === 'object' && (parsedModel.runtime as any).wifiAp) {
-    wifiApRuntime = (parsedModel.runtime as any).wifiAp as any;
-  }
-  let fiveGCpeRuntime: DeviceItem['fiveGCpe'] = null;
-  if (parsedModel && (parsedModel as any).fiveGCpe && typeof (parsedModel as any).fiveGCpe === 'object') {
-    fiveGCpeRuntime = (parsedModel as any).fiveGCpe as any;
-  } else if (parsedModel && parsedModel.runtime && typeof parsedModel.runtime === 'object' && (parsedModel.runtime as any).fiveGCpe) {
-    fiveGCpeRuntime = (parsedModel.runtime as any).fiveGCpe as any;
-  }
+  let cameraRuntime: DeviceItem['camera'] = extractCameraRuntime(parsedModel, prismaStatus);
+  let wifiApRuntime: DeviceItem['wifiAp'] = extractWifiApRuntime(parsedModel);
+  let fiveGCpeRuntime: DeviceItem['fiveGCpe'] = extractFiveGCpeRuntime(parsedModel);
   return {
     id: d.id,
     did: d.did,

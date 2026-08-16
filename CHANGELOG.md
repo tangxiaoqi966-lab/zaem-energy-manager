@@ -1,95 +1,150 @@
-# 更新说明
+# Changelog
 
-本文档记录最近几轮已经推送到仓库的主要更新内容，方便直接查看“这次到底改了什么”。
+This document records the most important repository updates so it is easy to see what changed in each round of work.
+
+## 2026-08-16
+
+### Database Status
+
+- Ran `prisma migrate deploy` against the configured PostgreSQL database.
+- Result: **no pending migrations**. The database schema is already up to date.
+
+### Xiaomi and Multi-Region Account Sync
+
+- Reworked the Xiaomi account sync page so region-based login is managed from a single entry point.
+- Added separate visible status cards for mainland China and Europe / international regions.
+- Added dedicated device-list endpoints for the main Xiaomi session and the secondary region session.
+- Updated the device sync pipeline to merge devices from both available Xiaomi sessions.
+- Removed the duplicated EU login form from the camera card and redirected the flow into the unified account-sync entry.
+
+### Smart Breaker Data Parsing and Database Protection
+
+- Fixed cumulative-energy parsing for `lxzn.switch.cbcsmj` smart breakers.
+- Restored the correct unit decoding for cumulative energy, current, and voltage.
+- Added runtime sanitization before writing Xiaomi telemetry into the database.
+- Added range guards and cumulative-energy monotonic protection to block corrupted spikes from being written into `Device` runtime fields.
+- Applied those guards to real-time refresh, power-on, power-off, and Xiaomi sync database writes.
+
+### Xiaomi Offline and Missing-Device Handling
+
+- Added handling for devices that disappear from the current Xiaomi response.
+- Missing devices are now marked offline instead of remaining silently stale in the management UI.
+
+### Xiaomi Login and Verification Flow Cleanup
+
+- Improved login and verification status reporting so the UI shows persistent, readable progress instead of short-lived toast-only messages.
+- Prevented the EU region flow from silently falling back to the main-account credentials.
+- Added a dedicated EU continue-login route so browser verification can resume the Xiaomi session flow.
+- Improved failure-state persistence so verification errors update the visible status instead of leaving the UI stuck on “code sent”.
+- Switched EU / international challenge handling to prefer browser verification instead of forcing the email-code path first.
+- Updated the verification-page opening flow so it refreshes status before opening a link and no longer reuses the previous stale URL as a fallback.
+
+### Frontend and UI Refinements
+
+- Improved the account-sync page layout and state handling for region login cards.
+- Adjusted the network device page to use cleaner short vendor naming instead of long raw device-brand strings.
+- Continued compactness and deduplication work across dashboard, charts, logs, alarms, and settings pages.
+
+### Shared Library Refactoring and Deduplication
+
+- Extracted repeated formatting, mapping, and runtime-parsing logic into shared libraries.
+- Introduced a shared `format` module so number, date, and energy formatting is no longer duplicated across pages.
+- Introduced a shared `status-maps` module to replace scattered switch branches in alarm and room-card views.
+- Introduced shared `crypto-helpers`, `http-auth`, and `device-runtime` modules to unify digest/basic-auth algorithms and camera/gateway runtime extraction.
+- Extracted reusable system-settings option definitions to reduce duplicated option blocks.
+- Slimmed down several large core files, including `RoomCard.tsx`, `system.service.ts`, and `xiaomi.adapter.ts`.
+- Both `server` and `client` now pass TypeScript checks with zero errors after the refactor.
+
+### Security and Repository Hygiene
+
+- Removed a debug script that contained a hardcoded admin JWT token.
+- Removed temporary debug screenshots from the repository root.
+- Added `.gitignore` rules for Prisma generated output and local debug artifacts so they cannot be committed again.
+
+### Repository Documentation
+
+- Converted the main repository documentation to English.
+- Rewrote `README.md` in English.
+- Rewrote this `CHANGELOG.md` in English and expanded the latest update record.
 
 ## 2026-08-11
 
-### 0. 远程前端连接修正
+### Remote Frontend Connectivity Fix
 
-- 修复线上静态站误将自身域名当作后端地址的问题
-- 修复前端构建后 `API / Socket` 指向错误导致的远程报错
-- 修复以下典型现象：
-  - `WebSocket connection ... /socket.io failed`
-  - `Failed to load module script`
-  - 静态站把接口或资源错误回退成 `text/html`
-- 当前远程前端已重新按有效后端入口重新构建并部署
-- 补充说明：
-  - 目前远程后端仍基于 Cloudflare Quick Tunnel
-  - 该地址属于临时入口，后续若 tunnel 变更，前端仍需重新构建或切到稳定入口
+- Fixed a production issue where the deployed static frontend incorrectly pointed API and Socket.IO traffic back to itself.
+- Rebuilt the frontend so API and WebSocket targets point to the real backend entry again.
+- Addressed common symptoms such as:
+  - failed `/socket.io` connections
+  - module script loading failures
+  - static assets or API calls falling back to `text/html`
+- Documented that the remote backend was still using a Cloudflare Quick Tunnel at that time, which remained a temporary entry point.
 
-### 1. 仪表盘报警摘要优化
+### Dashboard Alert Summary Refresh
 
-- 将顶部大块报警提示改为两个更紧凑的摘要卡片
-- 左侧显示“最新报警”
-- 右侧显示“已断电房间”
-- 最新报警支持短暂停留后自动消失，减少页面占用
-- 已断电摘要会直接显示哪些房间已经因为超额而断电
+- Reworked the top alert area into two compact summary cards.
+- One card shows the latest alert.
+- The other shows rooms that were already cut off because of limit overflow.
+- The latest-alert card now auto-dismisses after a short delay to reduce visual clutter.
 
-### 2. 报警中心语义重做
+### Alarm Center Semantics
 
-- 80% / 90% / 95% 这类记录按“预警”处理，不再误导成故障工单
-- 状态文案改为：
-  - `待关注`
-  - `待处理`
-  - `已闭环`
-- 操作文案改为：
-  - `标记已读`
-  - `标记处理`
-- 已达到限额并且已经执行断电的记录会自动闭环
-- 预警条件消失后，对应预警会自动关闭，不再一直挂着“未解决”
+- Reclassified `80% / 90% / 95%` usage events as warnings instead of fault tickets.
+- Updated statuses to clearer labels such as:
+  - `Needs Attention`
+  - `Needs Handling`
+  - `Closed`
+- Updated action labels for clearer operator behavior.
+- Automatically closed records after automatic cut-off or automatic recovery when the event lifecycle was complete.
 
-### 3. 操作日志可读性增强
+### Audit Log Readability
 
-- 日志详情不再直接显示 JSON / 源代码式内容
-- 增加结构化操作详情格式化，统一转成人类可读文本
-- 操作日志现在会尽量明确写出：
-  - 动作类型
-  - 操作来源
-  - 房间 / 设备
-  - 登录地址
-  - 登录设备
-  - 成功或失败结果
-  - 失败原因
+- Replaced raw JSON-style log details with more readable human-facing summaries.
+- Improved log formatting to clearly show:
+  - action type
+  - source channel
+  - room / device
+  - login location
+  - login device
+  - success or failure result
+  - failure reason
 
-### 4. 操作来源与身份识别
+### Operation Source and Identity Attribution
 
-- 新增请求上下文提取逻辑
-- 自动识别操作来源：
-  - `网页-PC端`
-  - `网页-手机端`
-  - `APP`
-  - `接口客户端`
-  - `系统自动`
-- 登录日志支持记录来源 IP 和设备标签，便于判断是否为本人操作
+- Added request-context extraction for better operation labeling.
+- Improved automatic identification of action sources such as:
+  - web desktop
+  - web mobile
+  - app
+  - API client
+  - system automation
 
-### 5. 自动断电 / 恢复供电审计增强
+### Automatic Cut-Off and Restore Auditing
 
-- 明确区分手动断电、自动断电、手动恢复、自动恢复
-- 设备控制日志增加房间、设备、动作结果等信息
-- 批量控制和限额批量开关也写入更清晰的日志
-- 3 分钟冷却保护命中时，会明确写入“被拦截”和剩余等待时间
+- Clearly separated manual cut-off, automatic cut-off, manual restore, and automatic restore in the logs.
+- Added richer device-control log context for rooms, devices, and execution results.
+- Logged cooldown-protection interceptions with clearer messages and remaining-wait information.
 
-### 6. 米家设备控制确认增强
+### Xiaomi Device Control Confirmation
 
-- 发出开关电指令后，增加设备状态回读确认
-- 只有设备真实达到目标状态时，才记为成功
-- 避免出现“后台显示成功，但设备其实没动作”的假成功记录
+- Added post-command state confirmation after power on/off operations.
+- Marked operations successful only after the device actually reached the target state.
+- Reduced false-success records where the backend reported success but the device did not really change state.
 
-### 7. 前后端展示与接口细节修正
+### Frontend / API Behavior Fixes
 
-- 操作日志页支持直接显示格式化后的可读详情
-- 报警中心支持按当前筛选条件清除记录
-- 报警中心和操作日志页的筛选区继续压缩为更紧凑的单排布局
-- 前端 API 错误提示改为优先显示后端返回的真实错误消息
-- Socket 连接目标进一步修正，优先跟随后端 API 地址推导
+- Improved log page rendering for human-readable details.
+- Added filter-aware record clearing in the alarm center.
+- Further tightened filter layout on alarm and operation-log pages.
+- Updated frontend API error handling to prefer real backend messages.
+- Refined Socket target derivation to better follow the backend API address.
 
-### 8. 部署与远程运行修正
+### Deployment and Remote Runtime
 
-- 远程 Docker Compose 调整为通过 `.env` 读取关键环境变量
-- CORS 与 Socket.IO 跨域配置放宽为更适合当前远程代理场景的方式
-- 配合远程站点完成了前端静态资源更新与缓存清理
+- Adjusted the remote Docker Compose setup so critical variables are read from `.env`.
+- Relaxed CORS and Socket.IO settings for the current proxy-based deployment pattern.
+- Updated remote frontend assets and cleaned cached static resources.
 
-## 说明
+## Notes
 
-- 本文件用于记录“仓库最近更新了什么”
-- 更完整的功能介绍请查看 [`README.md`](./README.md)
+- This file is intended to answer “what changed in the repository recently?”
+- For a broader product and architecture overview, see [`README.md`](./README.md).

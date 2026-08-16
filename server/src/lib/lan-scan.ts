@@ -598,7 +598,7 @@ async function scanSingleLanDevices(options: LanScanOptions): Promise<{
         ]);
         tcpTriggered = tcpTouched.size;
       } catch {
-        // TCP 阶段有任何异常直接忽略，后面继续
+        // Ignore any TCP-stage errors and continue
       }
     }
 
@@ -657,7 +657,7 @@ async function scanSingleLanDevices(options: LanScanOptions): Promise<{
           } catch { /* noop */ }
         }
       } catch {
-        // UDP 阶段失败也继续
+        // Continue even if the UDP stage fails
       }
     }
 

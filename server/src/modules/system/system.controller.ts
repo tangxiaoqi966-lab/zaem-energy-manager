@@ -164,6 +164,30 @@ export const xiaomiStatus = async (
   }
 };
 
+export const xiaomiDevices = async (
+  _req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    const loggedIn = await xiaomiAdapter.isLoggedIn('main');
+    const authStatus = await xiaomiAdapter.getAuthStatus('main');
+    const sessionSnap = await xiaomiAdapter.peekSession('main');
+    const region = sessionSnap?.region || (authStatus as any)?.region || 'cn';
+    const username = sessionSnap?.username || authStatus?.username || undefined;
+    const devices = loggedIn ? await xiaomiAdapter.fetchDevices() : [];
+    res.json({
+      loggedIn,
+      region,
+      username,
+      auth: authStatus,
+      devices,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const xiaomiLogin = async (
   req: Request,
   res: Response,
@@ -872,7 +896,7 @@ export const updateDeviceCamera = async (
   }
 };
 
-// ──────────────── 摄像头区独立会话登录 ────────────────
+// ──────────────── Camera region: independent session login ────────────────
 export const xiaomiCameraLogin = async (
   req: Request,
   res: Response,
@@ -888,6 +912,7 @@ export const xiaomiCameraLogin = async (
       region,
       sendEmailVerificationCode,
       verificationCode,
+      continueAfterVerification,
     } = (req.body ?? {}) as {
       username?: string;
       password?: string;
@@ -897,6 +922,7 @@ export const xiaomiCameraLogin = async (
       region?: string;
       sendEmailVerificationCode?: boolean;
       verificationCode?: string;
+      continueAfterVerification?: boolean;
     };
 
     if (sendEmailVerificationCode) {
@@ -942,6 +968,33 @@ export const xiaomiCameraLogin = async (
       return;
     }
 
+    if (continueAfterVerification) {
+      try {
+        const success = await xiaomiAdapter.continueLogin('camera');
+        const authStatus = await xiaomiAdapter.getAuthStatus('camera');
+        res.json({
+          loggedIn: success,
+          usedEnv: false,
+          loginMode: 'password' as const,
+          scope: 'camera' as const,
+          verificationMethod: authStatus?.verificationMethod ?? null,
+          auth: authStatus,
+        });
+      } catch (inner: any) {
+        const authStatus = await xiaomiAdapter.getAuthStatus('camera').catch(() => null);
+        res.status(400).json({
+          code: 'XIAOMI_CAMERA_CONTINUE_LOGIN_FAILED',
+          message: inner?.message || '米家 EU 账号继续登录失败',
+          usedEnv: false,
+          loginMode: 'password' as const,
+          scope: 'camera' as const,
+          verificationMethod: authStatus?.verificationMethod ?? null,
+          auth: authStatus ?? undefined,
+        });
+      }
+      return;
+    }
+
     const useSessionInput = !!(userId && serviceToken && ssecurity);
     if (useSessionInput) {
       const success = await xiaomiAdapter.loginWithSession(
@@ -964,8 +1017,8 @@ export const xiaomiCameraLogin = async (
       });
       return;
     }
-    const envUser = process.env.XIAOMI_CAMERA_USERNAME ?? process.env.XIAOMI_USERNAME;
-    const envPass = process.env.XIAOMI_CAMERA_PASSWORD ?? process.env.XIAOMI_PASSWORD;
+    const envUser = process.env.XIAOMI_CAMERA_USERNAME;
+    const envPass = process.env.XIAOMI_CAMERA_PASSWORD;
     if (envUser && envPass) {
       const success = await xiaomiAdapter.login(undefined, undefined, 'camera', region);
       const authStatus = await xiaomiAdapter.getAuthStatus('camera');
@@ -980,7 +1033,7 @@ export const xiaomiCameraLogin = async (
     }
     res.status(400).json({
       code: 'CAMERA_CREDENTIALS_REQUIRED',
-      message: '请提供米家欧洲区摄像头账号密码，或在 server/.env 配置 XIAOMI_CAMERA_USERNAME / XIAOMI_CAMERA_PASSWORD',
+      message: '请在欧洲区登录卡片里输入账号密码，或在 server/.env 单独配置 XIAOMI_CAMERA_USERNAME / XIAOMI_CAMERA_PASSWORD',
     });
   } catch (error: any) {
     const authStatus = await xiaomiAdapter.getAuthStatus('camera').catch(() => null);
@@ -998,7 +1051,7 @@ export const xiaomiCameraLogin = async (
   }
 };
 
-// ──────────────── 摄像头区：发送邮箱验证码 ────────────────
+// ──────────────── Camera region: send email verification code ────────────────
 export const xiaomiCameraSendEmailCode = async (
   _req: Request,
   res: Response,
@@ -1026,7 +1079,7 @@ export const xiaomiCameraSendEmailCode = async (
   }
 };
 
-// ──────────────── 摄像头区：提交邮箱验证码并完成登录 ────────────────
+// ──────────────── Camera region: verify email code and complete login ────────────────
 export const xiaomiCameraVerifyEmailCode = async (
   req: Request,
   res: Response,
@@ -1063,7 +1116,7 @@ export const xiaomiCameraVerifyEmailCode = async (
   }
 };
 
-// ──────────────── 摄像头：开启 RTSP 流 + 返回 HLS/WebRTC 地址 ────────────────
+// ──────────────── Camera: start RTSP stream + return HLS/WebRTC address ────────────────
 export const getCameraStream = async (
   req: Request,
   res: Response,
@@ -1080,9 +1133,9 @@ export const getCameraStream = async (
     );
     const model = device?.model ?? '';
     const name = device?.name ?? '';
-    // ① 调 MiOT start_rtsp_stream 拿局域网 RTSP 地址 + token
+    // ① Call MiOT start_rtsp_stream to obtain the LAN RTSP address + token
     const rtspInfo = await xiaomiAdapter.startRTSPStream(did, model, 'camera');
-    // ② 让流媒体层（ffmpeg / MediaMTX）转成可在浏览器播放的 HLS + WebRTC
+    // ② Let the media layer (ffmpeg / MediaMTX) convert to browser-playable HLS + WebRTC
     const streamUrls = await systemService.ensureCameraStreamProxy(did, rtspInfo.rtspUrl, {
       model,
       name,
@@ -1100,7 +1153,7 @@ export const getCameraStream = async (
   }
 };
 
-// ──────────────── 摄像头：PTZ 云台控制 ────────────────
+// ──────────────── Camera: PTZ control ────────────────
 export const controlCameraPTZ = async (
   req: Request,
   res: Response,
@@ -1139,7 +1192,7 @@ export const controlCameraPTZ = async (
   }
 };
 
-// ──────────────── 摄像头区：状态/认证状态查询 ────────────────
+// ──────────────── Camera region: status / auth status query ────────────────
 export const xiaomiCameraStatus = async (
   _req: Request,
   res: Response,
@@ -1149,8 +1202,8 @@ export const xiaomiCameraStatus = async (
     const loggedIn = await xiaomiAdapter.isLoggedIn('camera');
     const authStatus = await xiaomiAdapter.getAuthStatus('camera');
     const hasEnvCredentials =
-      !!(process.env.XIAOMI_CAMERA_USERNAME ?? process.env.XIAOMI_USERNAME) &&
-      !!(process.env.XIAOMI_CAMERA_PASSWORD ?? process.env.XIAOMI_PASSWORD);
+      !!process.env.XIAOMI_CAMERA_USERNAME &&
+      !!process.env.XIAOMI_CAMERA_PASSWORD;
     const sessionSnap = await xiaomiAdapter.peekSession('camera');
     res.json({
       loggedIn,
@@ -1159,7 +1212,7 @@ export const xiaomiCameraStatus = async (
         authStatus?.username ??
         sessionSnap?.username ??
         (hasEnvCredentials
-          ? (process.env.XIAOMI_CAMERA_USERNAME ?? process.env.XIAOMI_USERNAME ?? '已配置账号')
+          ? (process.env.XIAOMI_CAMERA_USERNAME ?? '已配置账号')
           : undefined),
       region: sessionSnap?.region ?? (authStatus as any)?.region ?? null,
       auth: authStatus,
@@ -1169,7 +1222,7 @@ export const xiaomiCameraStatus = async (
   }
 };
 
-// ──────────────── 摄像头区：设备列表 ────────────────
+// ──────────────── Camera region: device list ────────────────
 export const xiaomiCameraDevices = async (
   req: Request,
   res: Response,
@@ -1206,7 +1259,7 @@ export const xiaomiCameraDevices = async (
   }
 };
 
-// ──────────────── 本地设备适配器：读取配置 ────────────────
+// ──────────────── Local device adapter: read config ────────────────
 export const getDeviceAdapterConfig = async (
   req: Request,
   res: Response,
@@ -1227,7 +1280,7 @@ export const getDeviceAdapterConfig = async (
   }
 };
 
-// ──────────────── 本地设备适配器：写入配置 ────────────────
+// ──────────────── Local device adapter: write config ────────────────
 export const saveDeviceAdapterConfig = async (
   req: Request,
   res: Response,
@@ -1258,7 +1311,7 @@ export const saveDeviceAdapterConfig = async (
   }
 };
 
-// ──────────────── 本地设备适配器：刷新运行时 ────────────────
+// ──────────────── Local device adapter: refresh runtime ────────────────
 export const refreshDeviceRuntime = async (
   req: Request,
   res: Response,

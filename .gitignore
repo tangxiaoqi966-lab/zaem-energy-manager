@@ -15,3 +15,6 @@ data/
 dist_zaem_*.zip
 debug-*.md
 .dbg/
+server/generated/
+server/run_lanscan.ps1
+camera-*.png

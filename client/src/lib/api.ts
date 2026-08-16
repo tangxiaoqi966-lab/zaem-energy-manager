@@ -206,6 +206,41 @@ export const system = {
       lastAttemptAt?: string | null;
     };
   }> => api.get('/system/xiaomi/status').then((res) => res.data),
+  xiaomiDevices: (): Promise<{
+    loggedIn: boolean;
+    username?: string;
+    region?: string;
+    auth?: {
+      state?: string | null;
+      needsVerification?: boolean | null;
+      verificationMethod?: 'email_code' | 'browser' | null;
+      message?: string | null;
+      notificationUrl?: string | null;
+      username?: string | null;
+      codeSentAt?: string | null;
+      lastAttemptAt?: string | null;
+      securityStatus?: number | null;
+      pwd?: number | null;
+      code?: string | null;
+      location?: string | null;
+      region?: string | null;
+      notificationId?: string | null;
+      emailMask?: string | null;
+      emailBound?: boolean | null;
+      sendFailed?: boolean | null;
+      rawSendBody?: any;
+    } | null;
+    devices: Array<{
+      did: string;
+      name: string;
+      model: string;
+      localIp?: string | null;
+      online?: boolean;
+      vendorName?: string | null;
+      sourceRegion?: string | null;
+      sourceScope?: 'main' | 'camera';
+    }>;
+  }> => api.get('/system/xiaomi/devices').then((res) => res.data),
   xiaomiLogin: (
     username?: string,
     password?: string,
@@ -410,6 +445,15 @@ export const system = {
     api
       .post('/system/xiaomi/camera/verify_email_code', { verificationCode })
       .then((res) => res.data),
+  xiaomiCameraContinueLogin: (): Promise<{
+    loggedIn?: boolean;
+    usedEnv?: boolean;
+    loginMode?: 'password' | 'session' | 'env';
+    scope?: 'camera';
+    verificationMethod?: 'email_code' | 'browser' | null;
+    auth?: any;
+    message?: string;
+  }> => api.post('/system/xiaomi/camera/login/continue', { continueAfterVerification: true }).then((res) => res.data),
   xiaomiCameraDevices: (): Promise<{
     loggedIn: boolean;
     username?: string;

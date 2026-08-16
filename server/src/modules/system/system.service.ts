@@ -28,122 +28,31 @@ import { broadcastDashboard } from '../../lib/socket';
 import { DEFAULT_BUSINESS_TIMEZONE, normalizeBusinessTimeZone } from '../../lib/business-time';
 import { OperationActorContext } from '../../lib/operation-log';
 import { formatRoomDisplayName, normalizeRoomAnnotation } from '../../lib/room-display';
+import { buildBasicAuthHeader, buildBasicAuthToken, buildDigestAuthHeader, normalizeAuthType } from '../../lib/http-auth';
 import crypto from 'crypto';
 import axios from 'axios';
 import path from 'path';
 import fs from 'fs';
 import { spawn, ChildProcessByStdio } from 'child_process';
 import { Readable as NodeReadable } from 'stream';
-
-const DEFAULT_SETTINGS: SystemSettingsData = {
-  alarmRatio80: 0.8,
-  alarmRatio90: 0.9,
-  alarmRatio95: 0.95,
-  autoCutoff: true,
-  autoRestorePower: true,
-  businessTimezone: DEFAULT_BUSINESS_TIMEZONE,
-  refreshInterval: 5000,
-  dailyResetHour: 0,
-  pricePerKwh: 0.58,
-  priceAutoRegion: '',
-  priceAutoEnabled: false,
-  priceAutoSource: '',
-  priceAutoLastUpdatedAt: '',
-  defaultDailyLimitKwh: 10,
-  defaultMonthlyCostLimitEur: 200,
-  defaultDailyLimitUseWeeklyRules: false,
-  defaultDailyLimitWeekdayKwh: 10,
-  defaultDailyLimitSaturdayKwh: 10,
-  defaultDailyLimitSundayKwh: 10,
-  defaultDailyLimitUseHolidayRules: false,
-  defaultDailyLimitHolidayKwh: 10,
-  defaultDailyLimitHolidayDates: '',
-};
-
-type SettingsKey = keyof SystemSettingsData;
-const ALARM_RATIO_KEYS: SettingsKey[] = ['alarmRatio80', 'alarmRatio90', 'alarmRatio95'];
-const BOOLEAN_SETTING_KEYS: SettingsKey[] = [
-  'autoCutoff',
-  'autoRestorePower',
-  'priceAutoEnabled',
-  'defaultDailyLimitUseWeeklyRules',
-  'defaultDailyLimitUseHolidayRules',
-];
-const STRING_SETTING_KEYS: SettingsKey[] = [
-  'businessTimezone',
-  'priceAutoRegion',
-  'priceAutoSource',
-  'priceAutoLastUpdatedAt',
-  'defaultDailyLimitHolidayDates',
-];
-
-const PRICE_AUTO_REFRESH_INTERVAL_MS = 6 * 60 * 60 * 1000;
-
-const ELECTRICITY_PRICE_REFERENCE_MAP: Array<{
-  region: string;
-  pricePerKwh: number;
-  keywords: string[];
-}> = [
-  { region: '奥地利', pricePerKwh: 0.32, keywords: ['austria', 'osterreich', 'österreich', 'vienna', 'wien', 'europe/vienna'] },
-  { region: '德国', pricePerKwh: 0.40, keywords: ['germany', 'deutschland', 'berlin', 'europe/berlin'] },
-  { region: '法国', pricePerKwh: 0.29, keywords: ['france', 'paris', 'europe/paris'] },
-  { region: '意大利', pricePerKwh: 0.31, keywords: ['italy', 'italia', 'rome', 'europe/rome'] },
-  { region: '西班牙', pricePerKwh: 0.27, keywords: ['spain', 'espana', 'españa', 'madrid', 'europe/madrid'] },
-  { region: '葡萄牙', pricePerKwh: 0.25, keywords: ['portugal', 'lisbon', 'europe/lisbon'] },
-  { region: '荷兰', pricePerKwh: 0.32, keywords: ['netherlands', 'holland', 'amsterdam', 'europe/amsterdam'] },
-  { region: '比利时', pricePerKwh: 0.35, keywords: ['belgium', 'brussels', 'europe/brussels'] },
-  { region: '瑞士', pricePerKwh: 0.30, keywords: ['switzerland', 'zurich', 'geneva', 'europe/zurich'] },
-  { region: '爱尔兰', pricePerKwh: 0.37, keywords: ['ireland', 'dublin', 'europe/dublin'] },
-  { region: '英国', pricePerKwh: 0.31, keywords: ['uk', 'united kingdom', 'britain', 'london', 'europe/london'] },
-  { region: '瑞典', pricePerKwh: 0.20, keywords: ['sweden', 'stockholm', 'europe/stockholm'] },
-  { region: '挪威', pricePerKwh: 0.18, keywords: ['norway', 'oslo', 'europe/oslo'] },
-  { region: '芬兰', pricePerKwh: 0.19, keywords: ['finland', 'helsinki', 'europe/helsinki'] },
-  { region: '丹麦', pricePerKwh: 0.31, keywords: ['denmark', 'copenhagen', 'europe/copenhagen'] },
-  { region: '波兰', pricePerKwh: 0.24, keywords: ['poland', 'warsaw', 'europe/warsaw'] },
-  { region: '捷克', pricePerKwh: 0.22, keywords: ['czech', 'prague', 'europe/prague'] },
-  { region: '斯洛伐克', pricePerKwh: 0.21, keywords: ['slovakia', 'bratislava', 'europe/bratislava'] },
-  { region: '匈牙利', pricePerKwh: 0.15, keywords: ['hungary', 'budapest', 'europe/budapest'] },
-  { region: '罗马尼亚', pricePerKwh: 0.18, keywords: ['romania', 'bucharest', 'europe/bucharest'] },
-  { region: '克罗地亚', pricePerKwh: 0.20, keywords: ['croatia', 'zagreb', 'europe/zagreb'] },
-  { region: '斯洛文尼亚', pricePerKwh: 0.21, keywords: ['slovenia', 'ljubljana', 'europe/ljubljana'] },
-  { region: '中国', pricePerKwh: 0.08, keywords: ['china', 'shanghai', 'beijing', 'asia/shanghai'] },
-];
-
-function isAlarmRatioKey(key: SettingsKey): boolean {
-  return ALARM_RATIO_KEYS.includes(key);
-}
-
-function normalizeAlarmRatioValue(value: string | number): number {
-  const numValue = typeof value === 'number' ? value : parseFloat(value);
-  if (Number.isNaN(numValue)) {
-    return 0;
-  }
-
-  if (numValue > 1) {
-    return numValue / 100;
-  }
-
-  return numValue;
-}
-
-function normalizeRefreshIntervalValue(value: string | number): number {
-  const numValue = typeof value === 'number' ? value : parseFloat(value);
-  if (Number.isNaN(numValue) || numValue <= 0) {
-    return DEFAULT_SETTINGS.refreshInterval;
-  }
-  if (numValue < 1000) {
-    return numValue * 1000;
-  }
-  const allowed = [5000, 10000, 15000, 30000];
-  return allowed.find((item) => item === numValue) ?? DEFAULT_SETTINGS.refreshInterval;
-}
-
-function normalizeLookupText(...parts: Array<string | null | undefined>): string {
-  return parts
-    .map((part) => String(part ?? '').trim().toLowerCase())
-    .filter(Boolean)
-    .join(' | ');
-}
+import {
+  DEFAULT_SETTINGS,
+  ALARM_RATIO_KEYS,
+  BOOLEAN_SETTING_KEYS,
+  STRING_SETTING_KEYS,
+  PRICE_AUTO_REFRESH_INTERVAL_MS,
+  ELECTRICITY_PRICE_REFERENCE_MAP,
+  type SettingsKey,
+  isAlarmRatioKey,
+  normalizeAlarmRatioValue,
+  normalizeRefreshIntervalValue,
+  normalizeLookupText,
+  loadSettingsFromDb,
+  persistSettingsPartial,
+  resolveReferenceElectricityPrice as resolveRefPrice,
+} from './lib/system-settings.helper';
+void ELECTRICITY_PRICE_REFERENCE_MAP;
+void ALARM_RATIO_KEYS;
 
 class SystemService {
   private cameraStreamProcesses = new Map<string, {
@@ -203,73 +112,6 @@ class SystemService {
     return typeof result === 'string' ? result : String(obj ?? '');
   }
 
-  private buildDigestAuthHeader(
-    method: string,
-    url: string,
-    username: string,
-    password: string,
-    wwwAuthenticate: string,
-    nc = '00000001',
-    cnonce = Math.random().toString(16).slice(2, 10),
-  ): string {
-    const parseKv = (raw: string) => {
-      const out: Record<string, string> = {};
-      const re = /([a-zA-Z]+)=("[^"]*"|[^,]+)/g;
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(raw)) !== null) {
-        const k = m[1];
-        let v = m[2];
-        if (v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1);
-        out[k] = v;
-      }
-      return out;
-    };
-
-    const kv = parseKv(wwwAuthenticate);
-    const realm = kv.realm || '';
-    const nonce = kv.nonce || '';
-    const qop = kv.qop || '';
-    const opaque = kv.opaque || '';
-    const algo = (kv.algorithm || 'MD5').toUpperCase();
-    const pathname = (() => {
-      try {
-        const parsedUrl = new URL(url);
-        return parsedUrl.pathname + (parsedUrl.search || '');
-      } catch {
-        return '/';
-      }
-    })();
-
-    const md5Hex = (s: string): string => {
-      return crypto.createHash('md5').update(s, 'utf8').digest('hex');
-    };
-
-    const ha1 = algo === 'MD5-Sess'
-      ? md5Hex(`${md5Hex(`${username}:${realm}:${password}`)}:${nonce}:${cnonce}`)
-      : md5Hex(`${username}:${realm}:${password}`);
-    const ha2 = md5Hex(`${method}:${pathname}`);
-    const response = qop && (qop.includes('auth') || qop.split(',').map((s) => s.trim()).includes('auth'))
-      ? md5Hex(`${ha1}:${nonce}:${nc}:${cnonce}:auth:${ha2}`)
-      : md5Hex(`${ha1}:${nonce}:${ha2}`);
-
-    const parts = [
-      `username="${username}"`,
-      `realm="${realm}"`,
-      `nonce="${nonce}"`,
-      `uri="${pathname}"`,
-      `response="${response}"`,
-    ];
-    if (opaque) parts.push(`opaque="${opaque}"`);
-    if (algo) parts.push(`algorithm=${algo}`);
-    if (qop) {
-      const useQop = qop.split(',').map((s) => s.trim()).includes('auth') ? 'auth' : qop.split(',')[0].trim();
-      parts.push(`qop=${useQop}`);
-      parts.push(`nc=${nc}`);
-      parts.push(`cnonce="${cnonce}"`);
-    }
-    return `Digest ${parts.join(', ')}`;
-  }
-
   private async probeLanCameraSnapshotOnline(
     parsed: Record<string, unknown>,
     camObj: Record<string, unknown>,
@@ -286,10 +128,7 @@ class SystemService {
       typeof camObj.manualAuthPassword === 'string' && camObj.manualAuthPassword.trim()
         ? camObj.manualAuthPassword.trim()
         : '';
-    const manualAuthType =
-      camObj.manualAuthType === 'basic' || camObj.manualAuthType === 'none'
-        ? camObj.manualAuthType
-        : 'digest';
+    const manualAuthType = normalizeAuthType(camObj.manualAuthType);
     const hasManualAuth = !!(manualUser || manualPass);
     const parsedIp =
       typeof parsed.ipAddress === 'string' && parsed.ipAddress.trim()
@@ -303,7 +142,7 @@ class SystemService {
       .filter((entry) => typeof entry?.url === 'string' && /^https?:/i.test(String(entry.url)))
       .map((entry) => ({
         url: String(entry.url),
-        auth: entry.auth === 'basic' || entry.auth === 'none' ? entry.auth : 'digest',
+        auth: normalizeAuthType(entry.auth),
       }));
 
     const urls = [
@@ -327,7 +166,7 @@ class SystemService {
       const headers: Record<string, string> = {};
       const authPreference = hasManualAuth ? manualAuthType : entry.auth;
       if (hasManualAuth && authPreference === 'basic' && manualUser) {
-        headers.Authorization = `Basic ${Buffer.from(`${manualUser}:${manualPass}`, 'utf8').toString('base64')}`;
+        headers.Authorization = buildBasicAuthHeader(manualUser, manualPass);
       }
 
       try {
@@ -342,7 +181,7 @@ class SystemService {
           const www = resp.headers['www-authenticate'] || resp.headers['WWW-Authenticate'];
           const wwwStr = Array.isArray(www) ? www[0] : www;
           if (typeof wwwStr === 'string' && /digest/i.test(wwwStr)) {
-            const authz = this.buildDigestAuthHeader('GET', entry.url, manualUser, manualPass, wwwStr);
+            const authz = buildDigestAuthHeader('GET', entry.url, manualUser, manualPass, wwwStr);
             const retry = await axios.get(entry.url, {
               headers: { ...headers, Authorization: authz },
               timeout: 4000,
@@ -620,55 +459,11 @@ class SystemService {
   }
 
   public async getSettings(): Promise<SystemSettingsData> {
-    const settings = await prisma.systemSettings.findMany();
-    const result: SystemSettingsData = { ...DEFAULT_SETTINGS };
-
-    for (const setting of settings) {
-      const key = setting.key as SettingsKey;
-      if (key in DEFAULT_SETTINGS) {
-        if (BOOLEAN_SETTING_KEYS.includes(key)) {
-          (result as unknown as Record<string, number | boolean | string>)[key] = setting.value === 'true';
-        } else if (key === 'businessTimezone') {
-          (result as unknown as Record<string, number | boolean | string>)[key] = normalizeBusinessTimeZone(setting.value);
-        } else if (key === 'defaultDailyLimitHolidayDates') {
-          (result as unknown as Record<string, number | boolean | string>)[key] = setting.value;
-        } else if (isAlarmRatioKey(key)) {
-          (result as unknown as Record<string, number | boolean | string>)[key] =
-            normalizeAlarmRatioValue(setting.value);
-        } else if (key === 'refreshInterval') {
-          (result as unknown as Record<string, number | boolean | string>)[key] =
-            normalizeRefreshIntervalValue(setting.value);
-        } else {
-          const numValue = parseFloat(setting.value);
-          if (!isNaN(numValue)) {
-            (result as unknown as Record<string, number | boolean | string>)[key] = numValue;
-          }
-        }
-      }
-    }
-
-    return result;
-  }
-
-  private async persistSettingsPartial(partial: Partial<SystemSettingsData>): Promise<void> {
-    const entries = Object.entries(partial) as [SettingsKey, SystemSettingsData[SettingsKey]][];
-    for (const [key, value] of entries) {
-      const normalizedValue =
-        key === 'businessTimezone'
-          ? normalizeBusinessTimeZone(String(value))
-          : isAlarmRatioKey(key)
-            ? normalizeAlarmRatioValue(value as string | number)
-            : key === 'refreshInterval'
-              ? normalizeRefreshIntervalValue(value as string | number)
-              : value;
-      const stringValue =
-        typeof normalizedValue === 'boolean' ? String(normalizedValue) : String(normalizedValue ?? '');
-      await prisma.systemSettings.upsert({
-        where: { key: key as string },
-        update: { value: stringValue },
-        create: { key: key as string, value: stringValue },
-      });
-    }
+    const loaded = await loadSettingsFromDb();
+    (loaded as { businessTimezone: string }).businessTimezone = normalizeBusinessTimeZone(
+      (loaded as { businessTimezone: string }).businessTimezone || DEFAULT_BUSINESS_TIMEZONE,
+    );
+    return loaded;
   }
 
   public resolveReferenceElectricityPrice(input?: {
@@ -679,21 +474,11 @@ class SystemService {
     region: string;
     source: string;
   } {
-    const lookup = normalizeLookupText(input?.region, input?.businessTimezone);
-    const matched = ELECTRICITY_PRICE_REFERENCE_MAP.find((item) =>
-      item.keywords.some((keyword) => lookup.includes(keyword.toLowerCase())),
-    );
-    if (matched) {
-      return {
-        pricePerKwh: matched.pricePerKwh,
-        region: matched.region,
-        source: `${matched.region}参考均价`,
-      };
-    }
+    const res = resolveRefPrice(input);
     return {
-      pricePerKwh: DEFAULT_SETTINGS.pricePerKwh,
-      region: input?.region?.trim() || '未匹配区域',
-      source: '通用参考均价',
+      pricePerKwh: res.pricePerKwh,
+      region: res.region,
+      source: res.pricePerKwh === DEFAULT_SETTINGS.pricePerKwh ? '通用参考均价' : `${res.region}参考均价`,
     };
   }
 
@@ -724,7 +509,7 @@ class SystemService {
       priceAutoLastUpdatedAt: nowIso,
       priceAutoEnabled: options?.autoEnabled ?? current.priceAutoEnabled,
     };
-    await this.persistSettingsPartial(nextPartial);
+    await persistSettingsPartial(nextPartial);
 
     if (options?.writeOperationLog) {
       await writeOperation(
@@ -772,7 +557,7 @@ class SystemService {
     operatorUserId: string | null,
     actorContext?: OperationActorContext,
   ): Promise<SystemSettingsData> {
-    await this.persistSettingsPartial(partial);
+    await persistSettingsPartial(partial);
 
     await writeOperation(
       operatorUserId,
@@ -1782,71 +1567,8 @@ class SystemService {
       : null;
     const manualUser = camObj && typeof camObj.manualAuthUsername === 'string' ? camObj.manualAuthUsername : null;
     const manualPass = camObj && typeof camObj.manualAuthPassword === 'string' ? camObj.manualAuthPassword : null;
-    const manualAuthTypeRaw = camObj && typeof camObj.manualAuthType === 'string' ? camObj.manualAuthType : null;
-    const manualAuthType: 'digest' | 'basic' | 'none' =
-      manualAuthTypeRaw === 'basic' ? 'basic' : manualAuthTypeRaw === 'none' ? 'none' : 'digest';
+    const manualAuthType: 'digest' | 'basic' | 'none' = normalizeAuthType(camObj?.manualAuthType);
     const hasManualAuth = !!(manualUser || manualPass);
-
-    const md5Hex = (s: string): string => {
-      return (crypto as any).createHash('md5').update(s, 'utf8').digest('hex');
-    };
-    const computeDigestAuth = (
-      method: string,
-      url: string,
-      username: string,
-      password: string,
-      wwwAuthenticate: string,
-      nc = '00000001',
-      cnonce = Math.random().toString(16).slice(2, 10),
-    ): string => {
-      const parseKv = (raw: string) => {
-        const out: Record<string, string> = {};
-        const re = /([a-zA-Z]+)=("[^"]*"|[^,]+)/g;
-        let m: RegExpExecArray | null;
-        while ((m = re.exec(raw)) !== null) {
-          const k = m[1];
-          let v = m[2];
-          if (v.startsWith('"') && v.endsWith('"')) v = v.slice(1, -1);
-          out[k] = v;
-        }
-        return out;
-      };
-      const kv = parseKv(wwwAuthenticate);
-      const realm = kv.realm || '';
-      const nonce = kv.nonce || '';
-      const qop = kv.qop || '';
-      const opaque = kv.opaque || '';
-      const algo = (kv.algorithm || 'MD5').toUpperCase();
-      const pathname = (() => {
-        try { return new URL(url).pathname + (new URL(url).search || ''); } catch { return '/'; }
-      })();
-      const ha1 = algo === 'MD5-Sess'
-        ? md5Hex(md5Hex(`${username}:${realm}:${password}`) + `:${nonce}:${cnonce}`)
-        : md5Hex(`${username}:${realm}:${password}`);
-      const ha2 = md5Hex(`${method}:${pathname}`);
-      let response = '';
-      if (qop && (qop.includes('auth') || qop.split(',').map(s => s.trim()).includes('auth'))) {
-        response = md5Hex(`${ha1}:${nonce}:${nc}:${cnonce}:auth:${ha2}`);
-      } else {
-        response = md5Hex(`${ha1}:${nonce}:${ha2}`);
-      }
-      const parts = [
-        `username="${username}"`,
-        `realm="${realm}"`,
-        `nonce="${nonce}"`,
-        `uri="${pathname}"`,
-        `response="${response}"`,
-      ];
-      if (opaque) parts.push(`opaque="${opaque}"`);
-      if (algo) parts.push(`algorithm=${algo}`);
-      if (qop) {
-        const useQop = qop.split(',').map(s => s.trim()).includes('auth') ? 'auth' : qop.split(',')[0].trim();
-        parts.push(`qop=${useQop}`);
-        parts.push(`nc=${nc}`);
-        parts.push(`cnonce="${cnonce}"`);
-      }
-      return `Digest ${parts.join(', ')}`;
-    };
 
     const fetchWithAuth = async (url: string, entryAuthPreference: 'digest' | 'basic' | 'none'): Promise<{ ok: boolean; status: number; statusText: string; ct: string; buffer: Buffer } | { error: string }> => {
       let timer: ReturnType<typeof setTimeout> | null = null;
@@ -1859,7 +1581,7 @@ class SystemService {
           usedAuthType = manualAuthType === 'none' ? 'none' : manualAuthType;
         }
         if (hasManualAuth && usedAuthType === 'basic' && manualUser) {
-          headers['Authorization'] = `Basic ${Buffer.from(`${manualUser}:${manualPass || ''}`, 'utf8').toString('base64')}`;
+          headers['Authorization'] = buildBasicAuthHeader(manualUser, manualPass || '');
         }
         const resp = await axios.get(url, {
           headers,
@@ -1876,7 +1598,7 @@ class SystemService {
             const ctrl2 = new AbortController();
             const timer2 = setTimeout(() => ctrl2.abort(), 6000);
             try {
-              const authz = computeDigestAuth('GET', url, manualUser, manualPass || '', wwwStr);
+              const authz = buildDigestAuthHeader('GET', url, manualUser, manualPass || '', wwwStr);
               const resp2 = await axios.get(url, {
                 headers: { ...headers, Authorization: authz },
                 signal: ctrl2.signal as any,
@@ -1905,7 +1627,7 @@ class SystemService {
             const ctrl2 = new AbortController();
             const timer2 = setTimeout(() => ctrl2.abort(), 6000);
             try {
-              const basic = `Basic ${Buffer.from(`${manualUser}:${manualPass || ''}`, 'utf8').toString('base64')}`;
+              const basic = `Basic ${buildBasicAuthToken(manualUser, manualPass || '')}`;
               const resp2 = await axios.get(url, {
                 headers: { ...headers, Authorization: basic },
                 signal: ctrl2.signal as any,
@@ -2494,7 +2216,7 @@ class SystemService {
         const normalizeStoredPeak = (value: unknown): number | null => {
           const n = toPositiveNumber(value);
           if (n == null) return null;
-          // 清掉上一版误写进来的异常峰值，避免把流量/错误单位当成速率峰值。
+          // Drop abnormal peaks written by the previous version so traffic/wrong-unit values are not treated as rate peaks.
           if (n > 1000) return null;
           return n;
         };

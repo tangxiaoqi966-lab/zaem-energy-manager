@@ -26,33 +26,22 @@ import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { formatBytes as formatBytesShared, hasMeaningfulValue as hasMeaningfulValueShared, normalizeMac } from '@/lib/format';
 
 function normalizeMacKey(value?: string | null): string {
-  return String(value ?? '').toUpperCase().replace(/[^A-F0-9]/g, '');
+  return normalizeMac(value);
 }
 
 function formatBytes(bytes: number | null | undefined): string {
-  if (bytes == null || !Number.isFinite(bytes)) return '0 B';
-  const b = Number(bytes);
-  if (Math.abs(b) < 1024) return `${b.toFixed(0)} B`;
-  const k = b / 1024;
-  if (Math.abs(k) < 1024) return `${k.toFixed(1)} KB`;
-  const m = k / 1024;
-  if (Math.abs(m) < 1024) return `${m.toFixed(2)} MB`;
-  return `${(m / 1024).toFixed(2)} GB`;
+  return formatBytesShared(bytes);
+}
+
+function hasMeaningfulValue(value: unknown): boolean {
+  return hasMeaningfulValueShared(value);
 }
 
 function formatMbps(value: number | null | undefined): string | null {
   return value != null && Number.isFinite(value) && Number(value) > 0 ? `${Number(value).toFixed(1)} Mbps` : null;
-}
-
-function hasMeaningfulValue(value: unknown): boolean {
-  if (value == null) return false;
-  if (typeof value === 'number') return Number.isFinite(value) && value > 0;
-  if (typeof value === 'boolean') return true;
-  if (Array.isArray(value)) return value.length > 0;
-  const text = String(value).trim();
-  return !!text && !['--', '-- Mbps', '-- 台', '-- dBm', '0 B'].includes(text);
 }
 
 function inferClientEndpointType(input: {
@@ -300,7 +289,14 @@ export function NetworkDevicePage() {
 
   const firstAny = device as any;
   const isCpe = Boolean(firstAny?.fiveGCpe) || firstAny?.adapterKind === 'huawei_cpe';
-  const title = String(firstAny?.name ?? '网络设备').trim() || '网络设备';
+  const title = inferShortDeviceName(
+    String(firstAny?.category ?? 'other') as any,
+    firstAny?.vendorName ?? null,
+    firstAny?.fiveGCpe?.model ?? firstAny?.wifiAp?.model ?? firstAny?.model ?? null,
+    firstAny?.name ?? null,
+    firstAny?.ipAddress ?? firstAny?.ip ?? null,
+    isCpe ? 'cpe' : firstAny?.adapterKind === 'nokia_beacon' ? 'master' : undefined,
+  ).shortName || String(firstAny?.name ?? '网络设备').trim() || '网络设备';
   const networkAdminUrl = useMemo(() => {
     const fromConfig = String(adapterConfig?.baseUrl ?? '').trim();
     if (fromConfig) return fromConfig;

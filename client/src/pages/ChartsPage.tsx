@@ -16,9 +16,17 @@ import {
 } from '@/components/ui/select';
 import EChartsBar from '@/components/charts/EChartsBar';
 import EChartsLine from '@/components/charts/EChartsLine';
-import { ValueWithUnit, formatValueUnitHtml } from '@/components/ui/value-with-unit';
 import { FeeHint } from '@/components/ui/fee-hint';
 import { useSiteStore } from '@/store/site';
+import {
+  powerFormatter,
+  energyFormatter2,
+  formatPower,
+  formatEnergy,
+  formatCost,
+  formatEnergyHtml,
+  formatPowerHtml,
+} from '@/lib/format';
 
 type PeriodKey = 'day' | 'week' | 'month' | 'year';
 type ChartView = 'energy' | 'network';
@@ -80,55 +88,6 @@ const PERIOD_LABEL: Record<PeriodKey, string> = {
   month: '月',
   year: '年',
 };
-
-const numberFormatter1 = new Intl.NumberFormat('de-AT', {
-  minimumFractionDigits: 1,
-  maximumFractionDigits: 1,
-});
-
-const numberFormatter2 = new Intl.NumberFormat('de-AT', {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-const currencyFormatter = new Intl.NumberFormat('de-AT', {
-  style: 'currency',
-  currency: 'EUR',
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-function formatPower(value: number) {
-  return (
-    <ValueWithUnit
-      value={numberFormatter1.format(value)}
-      unit="W"
-      valueClassName="font-semibold"
-    />
-  );
-}
-
-function formatEnergy(value: number) {
-  return (
-    <ValueWithUnit
-      value={numberFormatter2.format(value)}
-      unit="kWh"
-      valueClassName="font-semibold"
-    />
-  );
-}
-
-function formatCost(value: number) {
-  return currencyFormatter.format(value);
-}
-
-function formatPowerHtml(value: number) {
-  return formatValueUnitHtml(numberFormatter1.format(value), 'W');
-}
-
-function formatEnergyHtml(value: number) {
-  return formatValueUnitHtml(numberFormatter2.format(value), 'kWh');
-}
 
 function shortenAxisLabel(label: string, maxLength: number) {
   if (label.length <= maxLength) return label;
@@ -649,7 +608,7 @@ export function ChartsPage() {
           nameTextStyle: { color: '#9ca3af', fontSize: 11 },
           axisLabel: {
             color: '#6b7280',
-            formatter: (value: number) => numberFormatter1.format(value),
+            formatter: (value: number) => powerFormatter.format(value),
           },
           splitLine: { lineStyle: { color: '#f3f4f6', type: 'dashed' } },
         },
@@ -661,7 +620,7 @@ export function ChartsPage() {
           nameTextStyle: { color: '#9ca3af', fontSize: 11 },
           axisLabel: {
             color: '#6b7280',
-            formatter: (value: number) => numberFormatter2.format(value),
+            formatter: (value: number) => energyFormatter2.format(value),
           },
           splitLine: { show: false },
         },
@@ -707,7 +666,7 @@ export function ChartsPage() {
             position: 'top',
             color: '#6b7280',
             fontSize: 11,
-            formatter: (params: any) => numberFormatter2.format(Number(params?.value ?? 0)),
+            formatter: (params: any) => energyFormatter2.format(Number(params?.value ?? 0)),
           },
         },
         {
@@ -801,7 +760,7 @@ export function ChartsPage() {
           nameTextStyle: { color: '#9ca3af', fontSize: 11 },
           axisLabel: {
             color: '#6b7280',
-            formatter: (value: number) => numberFormatter1.format(value),
+            formatter: (value: number) => powerFormatter.format(value),
           },
           splitLine: { lineStyle: { color: '#f3f4f6', type: 'dashed' } },
         },
@@ -813,7 +772,7 @@ export function ChartsPage() {
           nameTextStyle: { color: '#9ca3af', fontSize: 11 },
           axisLabel: {
             color: '#6b7280',
-            formatter: (value: number) => numberFormatter2.format(value),
+            formatter: (value: number) => energyFormatter2.format(value),
           },
           splitLine: { show: false },
         },
@@ -881,7 +840,7 @@ export function ChartsPage() {
           const item = list[0];
           return [
             `${item?.axisValue ?? ''}`,
-            `网络总量: <b>${numberFormatter2.format(Number(item?.value ?? 0))} GB</b>`,
+            `网络总量: <b>${energyFormatter2.format(Number(item?.value ?? 0))} GB</b>`,
           ].join('<br/>');
         },
       },
@@ -919,7 +878,7 @@ export function ChartsPage() {
         nameTextStyle: { color: '#9ca3af', fontSize: 11 },
         axisLabel: {
           color: '#6b7280',
-          formatter: (value: number) => numberFormatter2.format(value),
+          formatter: (value: number) => energyFormatter2.format(value),
         },
         splitLine: { lineStyle: { color: '#f3f4f6', type: 'dashed' } },
       },
@@ -1010,16 +969,16 @@ export function ChartsPage() {
                 </div>
                 <div className="rounded-lg border bg-muted/30 px-2.5 py-2">
                   <div className="text-xs text-muted-foreground">瞬时下行</div>
-                  <div className="mt-1 text-sm font-semibold sm:text-base">{numberFormatter2.format(totalInstantDownload)} Mbps</div>
+                  <div className="mt-1 text-sm font-semibold sm:text-base">{energyFormatter2.format(totalInstantDownload)} Mbps</div>
                 </div>
                 <div className="rounded-lg border bg-muted/30 px-2.5 py-2">
                   <div className="text-xs text-muted-foreground">瞬时上行</div>
-                  <div className="mt-1 text-sm font-semibold sm:text-base">{numberFormatter2.format(totalInstantUpload)} Mbps</div>
+                  <div className="mt-1 text-sm font-semibold sm:text-base">{energyFormatter2.format(totalInstantUpload)} Mbps</div>
                 </div>
                 <div className="rounded-lg border bg-muted/30 px-2.5 py-2">
                   <div className="text-xs text-muted-foreground">{networkRankingMeta.seriesName}</div>
                   <div className="mt-1 text-sm font-semibold sm:text-base">
-                    {numberFormatter2.format(
+                    {energyFormatter2.format(
                       networkPeriod === 'month'
                         ? totalMonthTrafficGb
                         : networkPeriod === 'week'

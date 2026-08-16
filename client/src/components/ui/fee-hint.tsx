@@ -1,19 +1,13 @@
 import { cloneElement, isValidElement, type MouseEvent, type ReactElement } from 'react';
 import { toast } from 'sonner';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './tooltip';
+import { currencyFormatter } from '../../lib/format';
 
 interface FeeHintProps {
   pricePerKwh: number;
   children: ReactElement;
   stopPropagationOnMobile?: boolean;
 }
-
-const currencyFormatter = new Intl.NumberFormat('de-AT', {
-  style: 'currency',
-  currency: 'EUR',
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
 
 function isMobileLike(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;

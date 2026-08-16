@@ -13,6 +13,7 @@ import type {
 import { DeviceStatus, DeviceCategory, inferDeviceCategory, networkGroupKey, pickPrimaryPublicNetworkDevice, publicNetworkPrimaryScore } from '@shared/index';
 import { DeviceStatus as PrismaDeviceStatus } from '@prisma/client';
 import { DEFAULT_BUSINESS_TIMEZONE, addDays, getBusinessDate, getDateKey } from '../../lib/business-time';
+import { extractCameraRuntime, extractFiveGCpeRuntime, extractWifiApRuntime } from '../../lib/device-runtime';
 
 const PRISMA_TO_SHARED_DEVICE_STATUS: Record<PrismaDeviceStatus, DeviceStatus> =
   {
@@ -282,42 +283,9 @@ async function toDeviceItem(d: any): Promise<DeviceItem> {
   }
   const sharedStatus =
     PRISMA_TO_SHARED_DEVICE_STATUS[prismaStatus] ?? DeviceStatus.UNKNOWN;
-  let cameraRuntime: DeviceItem['camera'] = null;
-  if (parsedModel && parsedModel.camera && typeof parsedModel.camera === 'object') {
-    const c = parsedModel.camera as Record<string, unknown>;
-    const candidates = Array.isArray(c.snapshotCandidates) ? c.snapshotCandidates : null;
-    const manualUrl = typeof c.manualSnapshotUrl === 'string' ? c.manualSnapshotUrl : null;
-    const firstHttp = (manualUrl && /^https?:/i.test(manualUrl))
-      ? { url: manualUrl }
-      : (candidates as Array<Record<string, unknown>> | null)?.find((x) =>
-          typeof x?.url === 'string' && /^https?:/i.test(x.url as string),
-        );
-    const brandRaw = typeof c.manualBrand === 'string' ? c.manualBrand : c.brand;
-    const modelRaw = typeof c.manualModel === 'string' ? c.manualModel : c.model;
-    cameraRuntime = {
-      online: prismaStatus === 'online' && !!c.online,
-      snapshotUrl: firstHttp && typeof firstHttp.url === 'string' ? firstHttp.url : null,
-      streamUrl: null,
-      hdStreamUrl: null,
-      brand: typeof brandRaw === 'string' ? brandRaw : null,
-      model: typeof modelRaw === 'string' ? modelRaw : null,
-      hasAudio: typeof c.hasAudio === 'boolean' ? c.hasAudio : undefined,
-      hasNightVision: typeof c.hasNightVision === 'boolean' ? c.hasNightVision : undefined,
-      lastMotionAt: typeof c.lastMotionAt === 'string' ? c.lastMotionAt : null,
-    };
-  }
-  let wifiApRuntime: WifiApRuntime | null = null;
-  if (parsedModel && parsedModel.wifiAp && typeof parsedModel.wifiAp === 'object') {
-    wifiApRuntime = parsedModel.wifiAp as any;
-  } else if (parsedModel && parsedModel.runtime && typeof parsedModel.runtime === 'object' && (parsedModel.runtime as any).wifiAp) {
-    wifiApRuntime = (parsedModel.runtime as any).wifiAp as any;
-  }
-  let fiveGCpeRuntime: FiveGCpeRuntime | null = null;
-  if (parsedModel && parsedModel.fiveGCpe && typeof parsedModel.fiveGCpe === 'object') {
-    fiveGCpeRuntime = parsedModel.fiveGCpe as any;
-  } else if (parsedModel && parsedModel.runtime && typeof parsedModel.runtime === 'object' && (parsedModel.runtime as any).fiveGCpe) {
-    fiveGCpeRuntime = (parsedModel.runtime as any).fiveGCpe as any;
-  }
+  let cameraRuntime: DeviceItem['camera'] = extractCameraRuntime(parsedModel, prismaStatus);
+  let wifiApRuntime: WifiApRuntime | null = extractWifiApRuntime(parsedModel);
+  let fiveGCpeRuntime: FiveGCpeRuntime | null = extractFiveGCpeRuntime(parsedModel);
   return {
     id: d.id,
     did: d.did,
